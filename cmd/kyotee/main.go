@@ -8,18 +8,27 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/stukennedy/kyotee/internal/config"
+	"github.com/stukennedy/kyotee/internal/embedded"
 	"github.com/stukennedy/kyotee/internal/orchestrator"
+	"github.com/stukennedy/kyotee/internal/paths"
 	"github.com/stukennedy/kyotee/internal/tui"
 	"github.com/stukennedy/kyotee/internal/types"
 )
 
 var (
-	specPath string
-	repoPath string
+	appPaths *paths.Paths
 	task     string
 )
 
 func main() {
+	// Resolve paths early
+	var err error
+	appPaths, err = paths.Resolve()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	rootCmd := &cobra.Command{
 		Use:   "kyotee",
 		Short: "Kyotee - Interactive AI agent orchestrator",
@@ -32,12 +41,11 @@ Commands:
   kyotee              Start interactive discovery mode
   kyotee jobs         List all jobs (recent builds)
   kyotee resume <id>  Resume a paused or failed job
-  kyotee run -t "..." Run a task directly (skip discovery)`,
-		RunE: runDiscovery,
+  kyotee run -t "..." Run a task directly (skip discovery)
+  kyotee init         Initialize .kyotee in current project`,
+		PersistentPreRunE: ensureInitialized,
+		RunE:              runDiscovery,
 	}
-
-	rootCmd.Flags().StringVarP(&specPath, "spec", "s", "agent/spec.toml", "Path to spec.toml")
-	rootCmd.Flags().StringVarP(&repoPath, "repo", "r", ".", "Path to repository root")
 
 	// Run command - direct task execution
 	runCmd := &cobra.Command{
@@ -45,8 +53,6 @@ Commands:
 		Short: "Run a task directly (skip discovery)",
 		RunE:  runTask,
 	}
-	runCmd.Flags().StringVarP(&specPath, "spec", "s", "agent/spec.toml", "Path to spec.toml")
-	runCmd.Flags().StringVarP(&repoPath, "repo", "r", ".", "Path to repository root")
 	runCmd.Flags().StringVarP(&task, "task", "t", "", "Task description")
 	runCmd.MarkFlagRequired("task")
 
@@ -57,7 +63,6 @@ Commands:
 		Long:  "Show all previous jobs with their status. Use 'kyotee resume <id>' to continue a paused job.",
 		RunE:  listJobs,
 	}
-	jobsCmd.Flags().StringVarP(&specPath, "spec", "s", "agent/spec.toml", "Path to spec.toml")
 
 	// Resume command - resume a job
 	resumeCmd := &cobra.Command{
@@ -66,9 +71,16 @@ Commands:
 		Args:  cobra.ExactArgs(1),
 		RunE:  resumeJob,
 	}
-	resumeCmd.Flags().StringVarP(&specPath, "spec", "s", "agent/spec.toml", "Path to spec.toml")
 
-	rootCmd.AddCommand(runCmd, jobsCmd, resumeCmd)
+	// Init command - initialize project-local .kyotee
+	initCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Initialize .kyotee in current project",
+		Long:  "Creates a .kyotee directory in the current project for project-specific configuration.",
+		RunE:  initProject,
+	}
+
+	rootCmd.AddCommand(runCmd, jobsCmd, resumeCmd, initCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -76,22 +88,29 @@ Commands:
 	}
 }
 
+// ensureInitialized runs before any command to set up ~/.kyotee if needed
+func ensureInitialized(cmd *cobra.Command, args []string) error {
+	// Create directory structure
+	if err := appPaths.EnsureUserDir(); err != nil {
+		return err
+	}
+
+	// Install defaults on first run
+	if !appPaths.IsInitialized() {
+		fmt.Println("🐺 First run - setting up ~/.kyotee...")
+		if err := embedded.Install(appPaths.UserDir); err != nil {
+			return fmt.Errorf("failed to install defaults: %w", err)
+		}
+		fmt.Println("✓ Ready!")
+		fmt.Println()
+	}
+
+	return nil
+}
+
 // runDiscovery starts the interactive discovery mode
 func runDiscovery(cmd *cobra.Command, args []string) error {
-	absRepo, err := filepath.Abs(repoPath)
-	if err != nil {
-		return fmt.Errorf("invalid repo path: %w", err)
-	}
-
-	absSpec, err := filepath.Abs(specPath)
-	if err != nil {
-		return fmt.Errorf("invalid spec path: %w", err)
-	}
-
-	agentDir := filepath.Dir(absSpec)
-
-	// Start TUI in discovery mode
-	app := tui.NewApp(agentDir, absRepo)
+	app := tui.NewApp(appPaths.UserDir, appPaths.WorkDir)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
@@ -103,26 +122,16 @@ func runDiscovery(cmd *cobra.Command, args []string) error {
 
 // runTask runs a task directly without discovery
 func runTask(cmd *cobra.Command, args []string) error {
-	absRepo, err := filepath.Abs(repoPath)
-	if err != nil {
-		return fmt.Errorf("invalid repo path: %w", err)
-	}
-
-	absSpec, err := filepath.Abs(specPath)
-	if err != nil {
-		return fmt.Errorf("invalid spec path: %w", err)
-	}
-
-	agentDir := filepath.Dir(absSpec)
+	specPath := appPaths.EffectiveSpecPath()
 
 	// Load spec
-	spec, err := config.LoadSpec(absSpec)
+	spec, err := config.LoadSpec(specPath)
 	if err != nil {
 		return err
 	}
 
 	// Create engine
-	engine, err := orchestrator.NewEngine(spec, task, absRepo, agentDir)
+	engine, err := orchestrator.NewEngine(spec, task, appPaths.WorkDir, appPaths.UserDir)
 	if err != nil {
 		return err
 	}
@@ -135,7 +144,7 @@ func runTask(cmd *cobra.Command, args []string) error {
 		fmt.Printf("[phase] %s: %s\n", engine.State.Phases[idx].Phase.ID, status)
 	}
 	engine.OnNarrate = func(text string) {
-		fmt.Printf("💭 Ralph: %s\n", text)
+		fmt.Printf("💭 Kyotee: %s\n", text)
 	}
 
 	fmt.Printf("🐺 KYOTEE - Starting run: %s\n", engine.RunDir)
@@ -151,13 +160,7 @@ func runTask(cmd *cobra.Command, args []string) error {
 
 // listJobs shows all previous jobs
 func listJobs(cmd *cobra.Command, args []string) error {
-	absSpec, err := filepath.Abs(specPath)
-	if err != nil {
-		return fmt.Errorf("invalid spec path: %w", err)
-	}
-	agentDir := filepath.Dir(absSpec)
-
-	jobs, err := orchestrator.ListJobs(agentDir)
+	jobs, err := orchestrator.ListJobs(appPaths.UserDir)
 	if err != nil {
 		return err
 	}
@@ -207,14 +210,8 @@ func listJobs(cmd *cobra.Command, args []string) error {
 func resumeJob(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
 
-	absSpec, err := filepath.Abs(specPath)
-	if err != nil {
-		return fmt.Errorf("invalid spec path: %w", err)
-	}
-	agentDir := filepath.Dir(absSpec)
-
 	// Load job state
-	jobState, err := orchestrator.LoadJobState(agentDir, jobID)
+	jobState, err := orchestrator.LoadJobState(appPaths.UserDir, jobID)
 	if err != nil {
 		return fmt.Errorf("failed to load job %s: %w", jobID, err)
 	}
@@ -229,12 +226,73 @@ func resumeJob(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Task: %s\n\n", jobState.Task)
 
 	// Start TUI with the loaded job state
-	app := tui.NewAppWithJob(agentDir, jobState.RepoRoot, jobState)
+	app := tui.NewAppWithJob(appPaths.UserDir, jobState.RepoRoot, jobState)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}
+
+	return nil
+}
+
+// initProject creates a .kyotee directory in the current project
+func initProject(cmd *cobra.Command, args []string) error {
+	if appPaths.HasProjectConfig() {
+		fmt.Println(".kyotee already exists in this directory")
+		return nil
+	}
+
+	// Create project directory structure
+	dirs := []string{
+		appPaths.ProjectDir,
+		appPaths.ProjectSkills,
+	}
+
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create %s: %w", dir, err)
+		}
+	}
+
+	// Create a basic spec.toml
+	specContent := `# Project-specific kyotee configuration
+# Uncomment and customize as needed
+
+# [limits]
+# max_phase_iterations = 3
+# max_total_iterations = 10
+
+# [gates]
+# required_checks = ["syntax_check"]
+
+# [commands]
+# syntax_check = "echo 'Add your syntax check command'"
+# test = "echo 'Add your test command'"
+`
+
+	specPath := filepath.Join(appPaths.ProjectDir, "spec.toml")
+	if err := os.WriteFile(specPath, []byte(specContent), 0644); err != nil {
+		return fmt.Errorf("failed to write spec.toml: %w", err)
+	}
+
+	// Create .gitignore for the .kyotee directory
+	gitignore := `# Ignore run artifacts
+runs/
+`
+	gitignorePath := filepath.Join(appPaths.ProjectDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(gitignore), 0644); err != nil {
+		return fmt.Errorf("failed to write .gitignore: %w", err)
+	}
+
+	fmt.Println("✓ Created .kyotee/ in current directory")
+	fmt.Println()
+	fmt.Println("Files created:")
+	fmt.Println("  .kyotee/spec.toml   - Project configuration")
+	fmt.Println("  .kyotee/skills/     - Project-specific skills")
+	fmt.Println("  .kyotee/.gitignore  - Excludes run artifacts")
+	fmt.Println()
+	fmt.Println("Edit .kyotee/spec.toml to customize gates, commands, etc.")
 
 	return nil
 }

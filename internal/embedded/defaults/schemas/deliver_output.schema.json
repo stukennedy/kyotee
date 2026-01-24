@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["phase", "final_summary", "artifacts", "requirements_coverage", "evidence"],
+  "properties": {
+    "phase": { "const": "deliver" },
+    "final_summary": { "type": "string", "minLength": 1 },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path", "description"],
+        "properties": {
+          "kind": { "enum": ["diff", "report", "log"] },
+          "path": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "requirements_coverage": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["requirement", "status", "evidence_refs"],
+        "properties": {
+          "requirement": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["met", "partial", "unmet"] },
+          "evidence_refs": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "ref", "note"],
+        "properties": {
+          "kind": { "enum": ["file", "command_output"] },
+          "ref": { "type": "string", "minLength": 1 },
+          "note": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "narration": { "type": "string" }
+  }
+}

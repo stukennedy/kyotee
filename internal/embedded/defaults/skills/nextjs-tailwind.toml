@@ -1,0 +1,105 @@
+name = "Next.js + Tailwind"
+description = "React apps with Next.js App Router and Tailwind CSS"
+tags = ["nextjs", "next", "react", "tailwind", "typescript", "frontend", "web", "app-router"]
+
+[conventions]
+project_structure = """
+app/
+  layout.tsx       # Root layout
+  page.tsx         # Home page
+  globals.css      # Global styles
+  (routes)/        # Route groups
+    dashboard/
+      page.tsx
+      loading.tsx
+      error.tsx
+components/
+  ui/              # Reusable UI components
+  forms/           # Form components
+lib/
+  utils.ts         # Utility functions
+  api.ts           # API client
+hooks/             # Custom React hooks
+types/             # TypeScript types
+public/            # Static assets
+"""
+naming = "kebab-case for files/folders, PascalCase for components"
+file_extensions = ".tsx, .ts"
+
+[patterns]
+page_component = """
+import { Metadata } from 'next'
+
+export const metadata: Metadata = {
+  title: 'Page Title',
+}
+
+export default async function Page() {
+  const data = await getData()
+
+  return (
+    <main className="container mx-auto px-4 py-8">
+      <h1 className="text-3xl font-bold mb-6">Title</h1>
+      {/* content */}
+    </main>
+  )
+}
+"""
+
+server_action = """
+'use server'
+
+import { revalidatePath } from 'next/cache'
+
+export async function createItem(formData: FormData) {
+  const name = formData.get('name') as string
+
+  // Save to database
+  await db.items.create({ data: { name } })
+
+  revalidatePath('/items')
+}
+"""
+
+client_component = """
+'use client'
+
+import { useState } from 'react'
+
+export function Counter() {
+  const [count, setCount] = useState(0)
+
+  return (
+    <button
+      onClick={() => setCount(c => c + 1)}
+      className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+    >
+      Count: {count}
+    </button>
+  )
+}
+"""
+
+[docs]
+urls = [
+    "https://nextjs.org/docs",
+    "https://tailwindcss.com/docs",
+    "https://react.dev/reference/react"
+]
+
+[preferences]
+state_management = "React Server Components + minimal client state"
+styling = "Tailwind CSS with cn() utility"
+forms = "react-hook-form + zod"
+data_fetching = "Server Components for reads, Server Actions for writes"
+icons = "lucide-react"
+
+dependencies = [
+    "next",
+    "react",
+    "react-dom",
+    "tailwindcss",
+    "typescript",
+    "@types/node",
+    "@types/react"
+]
