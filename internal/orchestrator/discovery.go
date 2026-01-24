@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/stukennedy/kyotee/internal/skills"
 )
 
 // DiscoveryMessage represents a conversation message
@@ -18,18 +20,27 @@ type DiscoveryMessage struct {
 
 // Discovery handles the requirements gathering conversation
 type Discovery struct {
-	AgentDir string
-	RepoRoot string
-	History  []DiscoveryMessage
-	Spec     map[string]any
+	AgentDir      string
+	RepoRoot      string
+	History       []DiscoveryMessage
+	Spec          map[string]any
+	SkillRegistry *skills.Registry
+	ActiveSkill   *skills.Skill
+	BuildingSkill bool // True when building a new skill
+	NewSkill      *skills.Skill
 }
 
 // NewDiscovery creates a new discovery session
 func NewDiscovery(agentDir, repoRoot string) *Discovery {
+	// Load skill registry
+	skillsDir := filepath.Join(agentDir, "skills")
+	registry, _ := skills.NewRegistry(skillsDir) // Ignore error, will work without skills
+
 	return &Discovery{
-		AgentDir: agentDir,
-		RepoRoot: repoRoot,
-		History:  []DiscoveryMessage{},
+		AgentDir:      agentDir,
+		RepoRoot:      repoRoot,
+		History:       []DiscoveryMessage{},
+		SkillRegistry: registry,
 	}
 }
 
@@ -40,6 +51,11 @@ func (d *Discovery) SendMessage(userMsg string) (string, error) {
 		Role:    "user",
 		Content: userMsg,
 	})
+
+	// Try to match a skill from user's message if we don't have one yet
+	if d.ActiveSkill == nil && d.SkillRegistry != nil {
+		d.tryMatchSkill(userMsg)
+	}
 
 	// Build the prompt
 	prompt := d.buildPrompt()
@@ -59,7 +75,49 @@ func (d *Discovery) SendMessage(userMsg string) (string, error) {
 	// Check if spec is ready
 	d.parseSpec(response)
 
+	// Check for skill building commands
+	d.parseSkillBuilding(response)
+
 	return response, nil
+}
+
+// tryMatchSkill attempts to find a matching skill from user input
+func (d *Discovery) tryMatchSkill(userMsg string) {
+	// Extract potential tech stack terms
+	terms := extractTechTerms(userMsg)
+	if len(terms) == 0 {
+		return
+	}
+
+	skill := d.SkillRegistry.Find(terms...)
+	if skill != nil {
+		d.ActiveSkill = skill
+	}
+}
+
+// extractTechTerms pulls out technology-related words from text
+func extractTechTerms(text string) []string {
+	// Common tech keywords to look for
+	keywords := []string{
+		"go", "golang", "python", "rust", "typescript", "javascript", "node",
+		"react", "vue", "angular", "svelte", "next", "nextjs", "nuxt",
+		"gin", "echo", "fiber", "fastapi", "flask", "django", "express",
+		"tailwind", "bootstrap", "css", "sass",
+		"postgres", "mysql", "sqlite", "mongodb", "redis",
+		"rest", "api", "graphql", "grpc",
+		"cli", "web", "backend", "frontend",
+	}
+
+	textLower := strings.ToLower(text)
+	var found []string
+
+	for _, kw := range keywords {
+		if strings.Contains(textLower, kw) {
+			found = append(found, kw)
+		}
+	}
+
+	return found
 }
 
 // IsSpecReady returns true if a spec has been generated
@@ -70,6 +128,19 @@ func (d *Discovery) IsSpecReady() bool {
 // GetSpec returns the parsed spec
 func (d *Discovery) GetSpec() map[string]any {
 	return d.Spec
+}
+
+// GetActiveSkill returns the matched skill
+func (d *Discovery) GetActiveSkill() *skills.Skill {
+	return d.ActiveSkill
+}
+
+// ListSkills returns available skills
+func (d *Discovery) ListSkills() []*skills.Skill {
+	if d.SkillRegistry == nil {
+		return nil
+	}
+	return d.SkillRegistry.List()
 }
 
 func (d *Discovery) buildPrompt() string {
@@ -93,9 +164,25 @@ func (d *Discovery) buildPrompt() string {
 	// Get repo context
 	repoContext := d.getRepoContext()
 
+	// Get skill context
+	skillContext := d.getSkillContext()
+
+	// Get available skills list
+	availableSkills := d.getAvailableSkillsList()
+
 	parts := []string{
 		string(systemPrompt),
 		"",
+		"## Available Tech Stack Skills",
+		availableSkills,
+		"",
+	}
+
+	if skillContext != "" {
+		parts = append(parts, "## Active Skill (Use this for implementation guidance)", skillContext, "")
+	}
+
+	parts = append(parts,
 		"## Repository Context",
 		repoContext,
 		"",
@@ -103,9 +190,40 @@ func (d *Discovery) buildPrompt() string {
 		strings.Join(historyParts, "\n\n"),
 		"",
 		"Assistant:",
-	}
+	)
 
 	return strings.Join(parts, "\n")
+}
+
+func (d *Discovery) getAvailableSkillsList() string {
+	if d.SkillRegistry == nil {
+		return "No skills loaded. You can help the user build a new skill."
+	}
+
+	skillsList := d.SkillRegistry.List()
+	if len(skillsList) == 0 {
+		return "No skills available yet. Offer to learn a new tech stack with the user."
+	}
+
+	var lines []string
+	lines = append(lines, "Available skills (mention if user's tech choice matches one):")
+	for _, s := range skillsList {
+		lines = append(lines, fmt.Sprintf("- **%s**: %s (tags: %s)", s.Name, s.Description, strings.Join(s.Tags, ", ")))
+	}
+	lines = append(lines, "")
+	lines = append(lines, "If the user wants a tech stack not listed, offer to learn it together by:")
+	lines = append(lines, "1. Asking about their preferences (project structure, patterns, testing, etc.)")
+	lines = append(lines, "2. Fetching official documentation if they provide URLs")
+	lines = append(lines, "3. Building a new skill file they can reuse")
+
+	return strings.Join(lines, "\n")
+}
+
+func (d *Discovery) getSkillContext() string {
+	if d.ActiveSkill == nil {
+		return ""
+	}
+	return d.ActiveSkill.ToPromptContext()
 }
 
 func (d *Discovery) getRepoContext() string {
@@ -154,7 +272,8 @@ func (d *Discovery) callClaude(prompt string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-var specJSONRe = regexp.MustCompile(`(?s)\x60\x60\x60json\s*(\{[^` + "`" + `]*"spec_ready"\s*:\s*true[^` + "`" + `]*\})\s*\x60\x60\x60`)
+var specJSONRe = regexp.MustCompile(`(?s)` + "```" + `json\s*(\{[^` + "`" + `]*"spec_ready"\s*:\s*true[^` + "`" + `]*\})\s*` + "```")
+var skillJSONRe = regexp.MustCompile(`(?s)` + "```" + `json\s*(\{[^` + "`" + `]*"save_skill"\s*:\s*true[^` + "`" + `]*\})\s*` + "```")
 
 func (d *Discovery) parseSpec(response string) {
 	// Look for JSON spec block
@@ -174,6 +293,58 @@ func (d *Discovery) parseSpec(response string) {
 			d.Spec = spec
 		}
 	}
+}
+
+func (d *Discovery) parseSkillBuilding(response string) {
+	// Look for skill save block
+	matches := skillJSONRe.FindStringSubmatch(response)
+	if len(matches) < 2 {
+		return
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(matches[1]), &parsed); err != nil {
+		return
+	}
+
+	// Check if save_skill is true
+	if save, ok := parsed["save_skill"].(bool); ok && save {
+		if skillData, ok := parsed["skill"].(map[string]any); ok {
+			skill := &skills.Skill{
+				Name:        getString(skillData, "name"),
+				Description: getString(skillData, "description"),
+				Tags:        getStringSlice(skillData, "tags"),
+			}
+			if skill.Name != "" {
+				// Save the skill
+				skillsDir := filepath.Join(d.AgentDir, "skills")
+				if err := skills.SaveSkill(skillsDir, skill, true); err == nil {
+					d.SkillRegistry.Add(skill)
+					d.ActiveSkill = skill
+				}
+			}
+		}
+	}
+}
+
+func getString(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func getStringSlice(m map[string]any, key string) []string {
+	if v, ok := m[key].([]any); ok {
+		result := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
+			}
+		}
+		return result
+	}
+	return nil
 }
 
 func truncate(s string, max int) string {

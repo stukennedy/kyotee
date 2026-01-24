@@ -174,6 +174,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
 	switch msg.Type {
 	case tea.KeyCtrlC, tea.KeyEsc:
 		return a, tea.Quit
@@ -181,7 +183,7 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		if a.mode == ModeDiscovery {
 			if msg.Alt {
-				// Alt+Enter for newline in input
+				// Alt+Enter for newline in input - pass to textarea
 				var cmd tea.Cmd
 				a.input, cmd = a.input.Update(msg)
 				return a, cmd
@@ -207,10 +209,19 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 				return a, a.sendMessage(userMsg)
 			}
+			return a, nil
+		}
+
+	default:
+		// Pass all other keys to textarea when in discovery mode
+		if a.mode == ModeDiscovery && !a.waiting {
+			var cmd tea.Cmd
+			a.input, cmd = a.input.Update(msg)
+			cmds = append(cmds, cmd)
 		}
 	}
 
-	return a, nil
+	return a, tea.Batch(cmds...)
 }
 
 func (a *App) sendMessage(msg string) tea.Cmd {
