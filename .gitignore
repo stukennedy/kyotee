@@ -1,0 +1,10 @@
+# Build artifacts
+/kyotee
+*.exe
+
+# Runtime
+agent/runs/
+
+# Project state (created when running kyotee in a directory)
+.kyotee/
+.playwright-mcp/

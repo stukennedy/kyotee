@@ -1,0 +1,81 @@
+name = "Go + Gin"
+description = "REST APIs in Go using the Gin web framework"
+tags = ["go", "golang", "gin", "rest", "api", "backend", "web"]
+
+[conventions]
+project_structure = """
+cmd/
+  server/
+    main.go
+internal/
+  handlers/      # HTTP handlers
+  models/        # Data models
+  middleware/    # Custom middleware
+  repository/    # Database access
+  service/       # Business logic
+pkg/             # Shared utilities
+config/          # Configuration
+"""
+naming = "snake_case for files, PascalCase for exported types, camelCase for unexported"
+file_extensions = ".go"
+
+[patterns]
+router_setup = """
+func SetupRouter() *gin.Engine {
+    r := gin.Default()
+    r.Use(middleware.Logger())
+    r.Use(middleware.Recovery())
+
+    api := r.Group("/api/v1")
+    {
+        api.GET("/items", handlers.GetItems)
+        api.POST("/items", handlers.CreateItem)
+        api.GET("/items/:id", handlers.GetItem)
+        api.PUT("/items/:id", handlers.UpdateItem)
+        api.DELETE("/items/:id", handlers.DeleteItem)
+    }
+
+    return r
+}
+"""
+
+handler_template = """
+func GetItems(c *gin.Context) {
+    items, err := service.GetAllItems()
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    c.JSON(http.StatusOK, items)
+}
+"""
+
+error_handling = """
+type APIError struct {
+    Code    int    `json:"code"`
+    Message string `json:"message"`
+}
+
+func ErrorResponse(c *gin.Context, code int, message string) {
+    c.JSON(code, APIError{Code: code, Message: message})
+}
+"""
+
+[docs]
+urls = [
+    "https://gin-gonic.com/docs/",
+    "https://go.dev/doc/effective_go",
+    "https://pkg.go.dev/github.com/gin-gonic/gin"
+]
+
+[preferences]
+testing = "table-driven tests with testify"
+validation = "go-playground/validator/v10"
+config = "environment variables with godotenv or viper"
+logging = "zerolog or zap"
+database = "sqlx or gorm depending on complexity"
+
+dependencies = [
+    "github.com/gin-gonic/gin",
+    "github.com/go-playground/validator/v10"
+]

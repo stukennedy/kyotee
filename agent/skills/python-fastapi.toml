@@ -1,0 +1,91 @@
+name = "Python + FastAPI"
+description = "Modern Python REST APIs with FastAPI and async support"
+tags = ["python", "fastapi", "rest", "api", "async", "backend", "web", "pydantic"]
+
+[conventions]
+project_structure = """
+app/
+  main.py          # FastAPI app entry
+  api/
+    routes/        # Route handlers
+    deps.py        # Dependencies
+  core/
+    config.py      # Settings
+    security.py    # Auth helpers
+  models/          # Pydantic models
+  schemas/         # Request/response schemas
+  services/        # Business logic
+  db/              # Database models & connection
+tests/
+requirements.txt
+"""
+naming = "snake_case for everything, PascalCase for Pydantic models"
+file_extensions = ".py"
+
+[patterns]
+app_setup = """
+from fastapi import FastAPI
+from app.api.routes import router
+from app.core.config import settings
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    openapi_url=f"{settings.API_V1_STR}/openapi.json"
+)
+
+app.include_router(router, prefix=settings.API_V1_STR)
+"""
+
+route_template = """
+from fastapi import APIRouter, Depends, HTTPException
+from app.schemas.item import Item, ItemCreate
+from app.services import item_service
+
+router = APIRouter()
+
+@router.get("/items", response_model=list[Item])
+async def get_items():
+    return await item_service.get_all()
+
+@router.post("/items", response_model=Item, status_code=201)
+async def create_item(item: ItemCreate):
+    return await item_service.create(item)
+"""
+
+pydantic_model = """
+from pydantic import BaseModel, Field
+
+class ItemBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str | None = None
+
+class ItemCreate(ItemBase):
+    pass
+
+class Item(ItemBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+"""
+
+[docs]
+urls = [
+    "https://fastapi.tiangolo.com/",
+    "https://docs.pydantic.dev/latest/",
+    "https://www.starlette.io/"
+]
+
+[preferences]
+testing = "pytest with pytest-asyncio"
+validation = "pydantic v2"
+config = "pydantic-settings with .env"
+database = "SQLAlchemy 2.0 async or Tortoise ORM"
+formatting = "black + isort + ruff"
+
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pydantic-settings"
+]

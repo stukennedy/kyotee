@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["phase", "plan", "risks", "requirements_mapping", "evidence"],
+  "properties": {
+    "phase": { "const": "plan" },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal", "steps", "success_criteria"],
+      "properties": {
+        "goal": { "type": "string", "minLength": 1 },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "goal", "actions", "expected_files", "checks"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "goal": { "type": "string", "minLength": 1 },
+              "actions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "expected_files": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "checks": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            }
+          }
+        },
+        "success_criteria": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "risks": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "requirements_mapping": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["requirement", "plan_step_id", "evidence_refs"],
+        "properties": {
+          "requirement": { "type": "string", "minLength": 1 },
+          "plan_step_id": { "type": "string", "minLength": 1 },
+          "evidence_refs": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "ref", "note"],
+        "properties": {
+          "kind": { "enum": ["file", "command_output"] },
+          "ref": { "type": "string", "minLength": 1 },
+          "note": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "narration": { "type": "string" }
+  }
+}
