@@ -17,28 +17,33 @@ var (
 	specPath string
 	repoPath string
 	task     string
-	noTUI    bool
 )
 
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "kyotee",
-		Short: "Kyotee - AI agent orchestrator with a terminal UI",
-		Long: `Kyotee is a deterministic CLI orchestrator for AI agent workflows.
-It runs phases as a state machine, calls Claude Code as a worker,
-enforces strict JSON outputs, and provides a cyberpunk terminal experience.`,
+		Short: "Kyotee - Interactive AI agent orchestrator",
+		Long: `Kyotee is an interactive AI assistant that helps you define and build software projects.
+
+Launch without arguments to start an interactive discovery session where Kyotee
+will ask questions to understand your project before building it.
+
+Use 'kyotee run --task "..."' to skip discovery and run a task directly.`,
+		RunE: runDiscovery,
 	}
+
+	rootCmd.Flags().StringVarP(&specPath, "spec", "s", "agent/spec.toml", "Path to spec.toml")
+	rootCmd.Flags().StringVarP(&repoPath, "repo", "r", ".", "Path to repository root")
 
 	runCmd := &cobra.Command{
 		Use:   "run",
-		Short: "Run an orchestrated task",
+		Short: "Run a task directly (skip discovery)",
 		RunE:  runTask,
 	}
 
 	runCmd.Flags().StringVarP(&specPath, "spec", "s", "agent/spec.toml", "Path to spec.toml")
 	runCmd.Flags().StringVarP(&repoPath, "repo", "r", ".", "Path to repository root")
 	runCmd.Flags().StringVarP(&task, "task", "t", "", "Task description")
-	runCmd.Flags().BoolVar(&noTUI, "no-tui", false, "Run without TUI (plain output)")
 	runCmd.MarkFlagRequired("task")
 
 	rootCmd.AddCommand(runCmd)
@@ -49,8 +54,33 @@ enforces strict JSON outputs, and provides a cyberpunk terminal experience.`,
 	}
 }
 
+// runDiscovery starts the interactive discovery mode
+func runDiscovery(cmd *cobra.Command, args []string) error {
+	absRepo, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("invalid repo path: %w", err)
+	}
+
+	absSpec, err := filepath.Abs(specPath)
+	if err != nil {
+		return fmt.Errorf("invalid spec path: %w", err)
+	}
+
+	agentDir := filepath.Dir(absSpec)
+
+	// Start TUI in discovery mode
+	app := tui.NewApp(agentDir, absRepo)
+	p := tea.NewProgram(app, tea.WithAltScreen())
+
+	if _, err := p.Run(); err != nil {
+		return fmt.Errorf("TUI error: %w", err)
+	}
+
+	return nil
+}
+
+// runTask runs a task directly without discovery
 func runTask(cmd *cobra.Command, args []string) error {
-	// Resolve paths
 	absRepo, err := filepath.Abs(repoPath)
 	if err != nil {
 		return fmt.Errorf("invalid repo path: %w", err)
@@ -75,25 +105,6 @@ func runTask(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if noTUI {
-		return runWithoutTUI(engine)
-	}
-
-	return runWithTUI(engine)
-}
-
-func runWithTUI(engine *orchestrator.Engine) error {
-	model := tui.New(engine)
-	p := tea.NewProgram(model, tea.WithAltScreen())
-
-	if _, err := p.Run(); err != nil {
-		return fmt.Errorf("TUI error: %w", err)
-	}
-
-	return nil
-}
-
-func runWithoutTUI(engine *orchestrator.Engine) error {
 	// Simple console output
 	engine.OnOutput = func(phase, text string) {
 		fmt.Printf("[%s] %s", phase, text)

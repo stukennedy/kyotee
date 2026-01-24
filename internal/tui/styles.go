@@ -80,6 +80,48 @@ var (
 	SymbolActive  = PhaseActiveStyle.Render("●")
 	SymbolPassed  = PhasePassedStyle.Render("✓")
 	SymbolFailed  = PhaseFailedStyle.Render("✗")
+
+	// Chat styles
+	ChatBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(Dim).
+			Padding(1, 2)
+
+	InputBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(Secondary).
+			Padding(0, 1)
+
+	UserMsgStyle = lipgloss.NewStyle().
+			Foreground(Secondary).
+			Bold(true)
+
+	UserContentStyle = lipgloss.NewStyle().
+				Foreground(Text)
+
+	AssistantMsgStyle = lipgloss.NewStyle().
+				Foreground(Primary).
+				Bold(true)
+
+	AssistantContentStyle = lipgloss.NewStyle().
+				Foreground(Text)
+
+	ThinkingStyle = lipgloss.NewStyle().
+			Foreground(Muted).
+			Italic(true)
+
+	SpecBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(Accent).
+			Padding(0, 2)
+
+	SpecTitleStyle = lipgloss.NewStyle().
+			Foreground(Accent).
+			Bold(true)
+
+	HelpStyle = lipgloss.NewStyle().
+			Foreground(Muted).
+			Padding(0, 1)
 )
 
 // Logo renders the kyotee logo

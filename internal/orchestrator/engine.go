@@ -14,6 +14,20 @@ import (
 	"github.com/stukennedy/kyotee/internal/types"
 )
 
+// LoadSpecWithOverrides loads spec and applies overrides from discovery
+func LoadSpecWithOverrides(agentDir string, overrides map[string]any) (*types.Spec, error) {
+	specPath := filepath.Join(agentDir, "spec.toml")
+	spec, err := config.LoadSpec(specPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply any overrides from discovery spec
+	// (For now, we just use the base spec)
+
+	return spec, nil
+}
+
 // Engine orchestrates the phase execution
 type Engine struct {
 	Spec      *types.Spec
