@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -21,22 +22,26 @@ type AppMode int
 const (
 	ModeDiscovery AppMode = iota
 	ModeExecute
+	ModeHistory
 )
 
-// Messages
+// Messages for TUI updates
 type (
 	ResponseMsg struct {
 		Content string
 		Err     error
 	}
-	SpecReadyMsg struct {
-		Spec map[string]any
-	}
-	ExecuteStartMsg struct{}
-	ExecuteDoneMsg  struct {
-		Err    error
-		RunDir string
-	}
+	ExecuteStartMsg  struct{}
+	ExecuteDoneMsg   struct{ Err error }
+	PhaseStartMsg    struct{ PhaseID string }
+	PhaseEndMsg      struct{ PhaseID string; Passed bool }
+	PhaseOutputMsg   struct{ PhaseID string; Line string }
+	FileChangeMsg    struct{ PhaseID string; Path string; Action string }
+	GateStartMsg     struct{ PhaseID string; GateName string }
+	GateEndMsg       struct{ PhaseID string; GateName string; Passed bool }
+	NarrationMsg     struct{ Text string }
+	PauseMsg         struct{}
+	ResumeMsg        struct{}
 )
 
 // App is the main TUI application
@@ -55,29 +60,21 @@ type App struct {
 	waiting   bool
 
 	// Execute mode
-	engine  *orchestrator.Engine
-	phases  []phaseItem
-	execVP  viewport.Model
-	spinner spinner.Model
+	execState   *ExecuteState
+	selectedIdx int
+	execVP      viewport.Model
+	spinner     spinner.Model
+	cancelExec  func() // Function to cancel execution
 
 	// Shared
-	width     int
-	height    int
-	ready     bool
-	done      bool
-	err       error
-	runDir    string
-	narration string
+	width  int
+	height int
+	ready  bool
 }
 
 type chatMessage struct {
 	role    string
 	content string
-}
-
-type phaseItem struct {
-	name   string
-	status string
 }
 
 // NewApp creates a new application in discovery mode
@@ -95,7 +92,6 @@ func NewApp(agentDir, repoRoot string) App {
 
 	discovery := orchestrator.NewDiscovery(agentDir, repoRoot)
 
-	// Add initial greeting
 	messages := []chatMessage{
 		{role: "assistant", content: "Hey! I'm Kyotee. What would you like to build today?\n\nTell me about your project and I'll help figure out the details."},
 	}
@@ -107,6 +103,44 @@ func NewApp(agentDir, repoRoot string) App {
 		repoRoot:  repoRoot,
 		messages:  messages,
 		input:     ti,
+		spinner:   s,
+	}
+}
+
+// NewAppWithJob creates an application to resume an existing job
+func NewAppWithJob(agentDir, repoRoot string, jobState *orchestrator.JobState) App {
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = SpinnerStyle
+
+	// Convert job state to execute state
+	execState := &ExecuteState{
+		ProjectName: jobState.ProjectName,
+		Task:        jobState.Task,
+		StartTime:   jobState.StartTime,
+		RunDir:      filepath.Join(agentDir, "runs", jobState.ID),
+		Paused:      jobState.Status == "paused",
+	}
+
+	// Convert phases
+	for _, jp := range jobState.Phases {
+		execState.Phases = append(execState.Phases, PhaseProgress{
+			ID:        jp.ID,
+			Status:    jp.Status,
+			StartTime: jp.StartTime,
+			EndTime:   jp.EndTime,
+			Output:    jp.Output,
+			Expanded:  jp.Status == "running" || jp.Status == "failed",
+		})
+	}
+	execState.CurrentIdx = jobState.CurrentPhase
+
+	return App{
+		mode:      ModeExecute,
+		agentDir:  agentDir,
+		repoRoot:  repoRoot,
+		spec:      jobState.Spec,
+		execState: execState,
 		spinner:   s,
 	}
 }
@@ -135,6 +169,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.spinner, cmd = a.spinner.Update(msg)
 		cmds = append(cmds, cmd)
 
+	// Discovery messages
 	case ResponseMsg:
 		a.waiting = false
 		if msg.Err != nil {
@@ -150,23 +185,135 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.updateChatViewport()
 
-		// Check if spec is ready
 		if a.discovery.IsSpecReady() {
 			a.spec = a.discovery.GetSpec()
 			a.specReady = true
 		}
 
+	// Execute messages
 	case ExecuteStartMsg:
 		a.mode = ModeExecute
+		a.initExecuteState()
 		cmds = append(cmds, a.runExecute())
 
+	case PhaseStartMsg:
+		if a.execState != nil {
+			for i := range a.execState.Phases {
+				if a.execState.Phases[i].ID == msg.PhaseID {
+					a.execState.Phases[i].Status = "running"
+					a.execState.Phases[i].StartTime = time.Now()
+					a.execState.CurrentIdx = i
+					// Auto-expand running phase
+					a.execState.Phases[i].Expanded = true
+					a.selectedIdx = i
+					break
+				}
+			}
+		}
+
+	case PhaseEndMsg:
+		if a.execState != nil {
+			for i := range a.execState.Phases {
+				if a.execState.Phases[i].ID == msg.PhaseID {
+					if msg.Passed {
+						a.execState.Phases[i].Status = "passed"
+					} else {
+						a.execState.Phases[i].Status = "failed"
+					}
+					a.execState.Phases[i].EndTime = time.Now()
+					break
+				}
+			}
+		}
+
+	case PhaseOutputMsg:
+		if a.execState != nil {
+			for i := range a.execState.Phases {
+				if a.execState.Phases[i].ID == msg.PhaseID {
+					a.execState.Phases[i].Output = append(a.execState.Phases[i].Output, msg.Line)
+					break
+				}
+			}
+		}
+
+	case FileChangeMsg:
+		if a.execState != nil {
+			for i := range a.execState.Phases {
+				if a.execState.Phases[i].ID == msg.PhaseID {
+					a.execState.Phases[i].Files = append(a.execState.Phases[i].Files, FileChange{
+						Path:   msg.Path,
+						Action: msg.Action,
+					})
+					break
+				}
+			}
+		}
+
+	case GateStartMsg:
+		if a.execState != nil {
+			for i := range a.execState.Phases {
+				if a.execState.Phases[i].ID == msg.PhaseID {
+					a.execState.Phases[i].Gates = append(a.execState.Phases[i].Gates, GateProgress{
+						Name:   msg.GateName,
+						Status: "running",
+					})
+					break
+				}
+			}
+		}
+
+	case GateEndMsg:
+		if a.execState != nil {
+			for i := range a.execState.Phases {
+				if a.execState.Phases[i].ID == msg.PhaseID {
+					for j := range a.execState.Phases[i].Gates {
+						if a.execState.Phases[i].Gates[j].Name == msg.GateName {
+							if msg.Passed {
+								a.execState.Phases[i].Gates[j].Status = "passed"
+							} else {
+								a.execState.Phases[i].Gates[j].Status = "failed"
+							}
+							break
+						}
+					}
+					break
+				}
+			}
+		}
+
+	case NarrationMsg:
+		if a.execState != nil {
+			// Add narration to current phase output
+			idx := a.execState.CurrentIdx
+			if idx >= 0 && idx < len(a.execState.Phases) {
+				a.execState.Phases[idx].Output = append(
+					a.execState.Phases[idx].Output,
+					"💭 "+msg.Text,
+				)
+			}
+		}
+
 	case ExecuteDoneMsg:
-		a.done = true
-		a.err = msg.Err
-		a.runDir = msg.RunDir
+		if a.execState != nil {
+			a.execState.Error = msg.Err
+		}
+
+	case PauseMsg:
+		if a.execState != nil && !a.execState.Paused {
+			a.execState.Paused = true
+			if a.cancelExec != nil {
+				a.cancelExec()
+			}
+		}
+
+	case ResumeMsg:
+		if a.execState != nil && a.execState.Paused {
+			a.execState.Paused = false
+			cmds = append(cmds, a.runExecute())
+		}
 	}
 
-	// Update textarea when not waiting
+	// Update textarea when in discovery mode
 	if a.mode == ModeDiscovery && !a.waiting {
 		var cmd tea.Cmd
 		a.input, cmd = a.input.Update(msg)
@@ -179,52 +326,115 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	// Global keys
 	switch msg.Type {
-	case tea.KeyCtrlC, tea.KeyEsc:
+	case tea.KeyCtrlC:
 		return a, tea.Quit
 
-	case tea.KeyEnter:
-		if a.mode == ModeDiscovery {
-			if msg.Alt {
-				// Alt+Enter for newline in input - pass to textarea
-				var cmd tea.Cmd
-				a.input, cmd = a.input.Update(msg)
-				return a, cmd
+	case tea.KeyEsc:
+		if a.mode == ModeExecute {
+			// In execute mode, Esc pauses or quits if done
+			if a.execState != nil && (a.execState.Error != nil || a.allPhasesDone()) {
+				return a, tea.Quit
 			}
-
-			// Check for confirmation
-			input := strings.TrimSpace(strings.ToLower(a.input.Value()))
-			if a.specReady && (input == "yes" || input == "y") {
-				a.input.Reset()
-				return a, func() tea.Msg { return ExecuteStartMsg{} }
-			}
-
-			// Send message
-			if !a.waiting && strings.TrimSpace(a.input.Value()) != "" {
-				userMsg := strings.TrimSpace(a.input.Value())
-				a.messages = append(a.messages, chatMessage{
-					role:    "user",
-					content: userMsg,
-				})
-				a.input.Reset()
-				a.waiting = true
-				a.updateChatViewport()
-
-				return a, a.sendMessage(userMsg)
-			}
-			return a, nil
+			// Otherwise pause
+			return a, func() tea.Msg { return PauseMsg{} }
 		}
+		return a, tea.Quit
+	}
 
-	default:
-		// Pass all other keys to textarea when in discovery mode
-		if a.mode == ModeDiscovery && !a.waiting {
-			var cmd tea.Cmd
-			a.input, cmd = a.input.Update(msg)
-			cmds = append(cmds, cmd)
-		}
+	// Mode-specific keys
+	switch a.mode {
+	case ModeDiscovery:
+		return a.handleDiscoveryKey(msg)
+	case ModeExecute:
+		return a.handleExecuteKey(msg)
 	}
 
 	return a, tea.Batch(cmds...)
+}
+
+func (a *App) handleDiscoveryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		if msg.Alt {
+			var cmd tea.Cmd
+			a.input, cmd = a.input.Update(msg)
+			return a, cmd
+		}
+
+		input := strings.TrimSpace(strings.ToLower(a.input.Value()))
+		if a.specReady && (input == "yes" || input == "y") {
+			a.input.Reset()
+			return a, func() tea.Msg { return ExecuteStartMsg{} }
+		}
+
+		if !a.waiting && strings.TrimSpace(a.input.Value()) != "" {
+			userMsg := strings.TrimSpace(a.input.Value())
+			a.messages = append(a.messages, chatMessage{
+				role:    "user",
+				content: userMsg,
+			})
+			a.input.Reset()
+			a.waiting = true
+			a.updateChatViewport()
+			return a, a.sendMessage(userMsg)
+		}
+
+	default:
+		if !a.waiting {
+			var cmd tea.Cmd
+			a.input, cmd = a.input.Update(msg)
+			return a, cmd
+		}
+	}
+
+	return a, nil
+}
+
+func (a *App) handleExecuteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyUp:
+		if a.selectedIdx > 0 {
+			a.selectedIdx--
+		}
+	case tea.KeyDown:
+		if a.execState != nil && a.selectedIdx < len(a.execState.Phases)-1 {
+			a.selectedIdx++
+		}
+	case tea.KeyEnter:
+		// Toggle expand/collapse
+		if a.execState != nil && a.selectedIdx < len(a.execState.Phases) {
+			a.execState.Phases[a.selectedIdx].Expanded = !a.execState.Phases[a.selectedIdx].Expanded
+		}
+	case tea.KeyRunes:
+		switch string(msg.Runes) {
+		case "p":
+			if a.execState != nil && !a.execState.Paused {
+				return a, func() tea.Msg { return PauseMsg{} }
+			}
+		case "r":
+			if a.execState != nil && a.execState.Paused {
+				return a, func() tea.Msg { return ResumeMsg{} }
+			}
+		case "q":
+			return a, tea.Quit
+		}
+	}
+
+	return a, nil
+}
+
+func (a *App) allPhasesDone() bool {
+	if a.execState == nil {
+		return false
+	}
+	for _, p := range a.execState.Phases {
+		if p.Status == "pending" || p.Status == "running" {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *App) sendMessage(msg string) tea.Cmd {
@@ -234,39 +444,52 @@ func (a *App) sendMessage(msg string) tea.Cmd {
 	}
 }
 
+func (a *App) initExecuteState() {
+	projectName := "."
+	if pn, ok := a.spec["project_name"].(string); ok && pn != "" {
+		projectName = pn
+	}
+	a.execState = NewExecuteState(projectName, a.buildTaskFromSpec())
+}
+
 func (a *App) runExecute() tea.Cmd {
 	return func() tea.Msg {
-		// Build task from spec
 		task := a.buildTaskFromSpec()
 
 		// Determine project directory
 		projectRoot := a.repoRoot
-		if projectName, ok := a.spec["project_name"].(string); ok && projectName != "" && projectName != "." {
+		projectName := "."
+		if pn, ok := a.spec["project_name"].(string); ok && pn != "" && pn != "." {
+			projectName = pn
 			projectRoot = filepath.Join(a.repoRoot, projectName)
-			// Create the project directory
 			if err := os.MkdirAll(projectRoot, 0755); err != nil {
 				return ExecuteDoneMsg{Err: fmt.Errorf("failed to create project directory: %w", err)}
 			}
 		}
 
-		// Load spec config
 		spec, err := orchestrator.LoadSpecWithOverrides(a.agentDir, a.spec)
 		if err != nil {
 			return ExecuteDoneMsg{Err: err}
 		}
 
-		// Create engine with the project root
 		engine, err := orchestrator.NewEngine(spec, task, projectRoot, a.agentDir)
 		if err != nil {
 			return ExecuteDoneMsg{Err: err}
 		}
 
-		// Run
-		if err := engine.Run(); err != nil {
-			return ExecuteDoneMsg{Err: err, RunDir: engine.RunDir}
+		// Store run dir
+		if a.execState != nil {
+			a.execState.RunDir = engine.RunDir
 		}
 
-		return ExecuteDoneMsg{RunDir: engine.RunDir}
+		// Note: In a real implementation, we'd use channels to stream updates
+		// For now, we run synchronously (the streaming would require more complex
+		// integration with the Bubble Tea message loop)
+		if err := engine.Run(); err != nil {
+			return ExecuteDoneMsg{Err: err}
+		}
+
+		return ExecuteDoneMsg{}
 	}
 }
 
@@ -324,9 +547,7 @@ func (a *App) updateChatViewport() {
 		return
 	}
 
-	// Calculate available width for content (viewport - padding - prefix space)
-	// ChatBox has padding of 2 on each side, plus border, and prefix like "You: " or "🐺 "
-	contentWidth := a.chatVP.Width - 6 // Leave room for prefix
+	contentWidth := a.chatVP.Width - 6
 	if contentWidth < 20 {
 		contentWidth = 20
 	}
@@ -336,12 +557,11 @@ func (a *App) updateChatViewport() {
 		if msg.role == "user" {
 			prefix := UserMsgStyle.Render("You: ")
 			b.WriteString(prefix)
-			// Word-wrap the content and indent continuation lines
 			wrapped := wordwrap.String(msg.content, contentWidth)
 			lines := strings.Split(wrapped, "\n")
 			for i, line := range lines {
 				if i > 0 {
-					b.WriteString("      ") // Indent to align with first line
+					b.WriteString("      ")
 				}
 				b.WriteString(UserContentStyle.Render(line))
 				if i < len(lines)-1 {
@@ -351,12 +571,11 @@ func (a *App) updateChatViewport() {
 		} else {
 			prefix := AssistantMsgStyle.Render("🐺 ")
 			b.WriteString(prefix)
-			// Word-wrap the content and indent continuation lines
 			wrapped := wordwrap.String(msg.content, contentWidth)
 			lines := strings.Split(wrapped, "\n")
 			for i, line := range lines {
 				if i > 0 {
-					b.WriteString("   ") // Indent to align with first line (emoji is ~2 chars)
+					b.WriteString("   ")
 				}
 				b.WriteString(AssistantContentStyle.Render(line))
 				if i < len(lines)-1 {
@@ -381,16 +600,19 @@ func (a App) View() string {
 		return "Loading..."
 	}
 
-	if a.mode == ModeDiscovery {
+	switch a.mode {
+	case ModeDiscovery:
+		return a.viewDiscovery()
+	case ModeExecute:
+		return a.viewExecute()
+	default:
 		return a.viewDiscovery()
 	}
-	return a.viewExecute()
 }
 
 func (a App) viewDiscovery() string {
 	var b strings.Builder
 
-	// Header
 	header := HeaderStyle.Width(a.width).Render(
 		lipgloss.JoinHorizontal(lipgloss.Left,
 			Logo(),
@@ -401,24 +623,20 @@ func (a App) viewDiscovery() string {
 	b.WriteString(header)
 	b.WriteString("\n")
 
-	// Chat viewport
 	chatBox := ChatBoxStyle.Width(a.width - 2).Render(a.chatVP.View())
 	b.WriteString(chatBox)
 	b.WriteString("\n")
 
-	// Spec panel (if ready)
 	if a.specReady {
 		specView := a.renderSpec()
 		b.WriteString(specView)
 		b.WriteString("\n")
 	}
 
-	// Input
 	inputBox := InputBoxStyle.Width(a.width - 2).Render(a.input.View())
 	b.WriteString(inputBox)
 	b.WriteString("\n")
 
-	// Help
 	help := "Enter: send • Cmd/Alt+Enter: newline • Esc: quit"
 	if a.specReady {
 		help = "Type 'yes' to start building • " + help
@@ -461,34 +679,9 @@ func (a App) renderSpec() string {
 }
 
 func (a App) viewExecute() string {
-	var b strings.Builder
-
-	// Header
-	header := HeaderStyle.Width(a.width).Render(
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			Logo(),
-			"  ",
-			TitleStyle.Render("Building..."),
-			"  ",
-			a.spinner.View(),
-		),
-	)
-	b.WriteString(header)
-	b.WriteString("\n")
-
-	// Status
-	if a.done {
-		if a.err != nil {
-			b.WriteString(PhaseFailedStyle.Render(fmt.Sprintf("Error: %v", a.err)))
-		} else {
-			b.WriteString(PhasePassedStyle.Render(fmt.Sprintf("✓ Done! Artifacts in: %s", a.runDir)))
-		}
-		b.WriteString("\n\n")
-		b.WriteString(HelpStyle.Render("Press Esc to exit"))
-	} else {
-		b.WriteString(ThinkingStyle.Render("Running phases: context → plan → implement → verify → deliver"))
-		b.WriteString("\n")
+	if a.execState == nil {
+		return "Initializing..."
 	}
 
-	return b.String()
+	return RenderExecuteView(a.execState, a.width, a.selectedIdx, a.spinner.View())
 }
