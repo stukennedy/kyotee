@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -237,14 +239,24 @@ func (a *App) runExecute() tea.Cmd {
 		// Build task from spec
 		task := a.buildTaskFromSpec()
 
+		// Determine project directory
+		projectRoot := a.repoRoot
+		if projectName, ok := a.spec["project_name"].(string); ok && projectName != "" && projectName != "." {
+			projectRoot = filepath.Join(a.repoRoot, projectName)
+			// Create the project directory
+			if err := os.MkdirAll(projectRoot, 0755); err != nil {
+				return ExecuteDoneMsg{Err: fmt.Errorf("failed to create project directory: %w", err)}
+			}
+		}
+
 		// Load spec config
 		spec, err := orchestrator.LoadSpecWithOverrides(a.agentDir, a.spec)
 		if err != nil {
 			return ExecuteDoneMsg{Err: err}
 		}
 
-		// Create engine
-		engine, err := orchestrator.NewEngine(spec, task, a.repoRoot, a.agentDir)
+		// Create engine with the project root
+		engine, err := orchestrator.NewEngine(spec, task, projectRoot, a.agentDir)
 		if err != nil {
 			return ExecuteDoneMsg{Err: err}
 		}
@@ -426,6 +438,9 @@ func (a App) renderSpec() string {
 
 	if goal, ok := a.spec["goal"].(string); ok {
 		lines = append(lines, fmt.Sprintf("  %s", goal))
+	}
+	if projectName, ok := a.spec["project_name"].(string); ok && projectName != "" && projectName != "." {
+		lines = append(lines, fmt.Sprintf("  Project: %s/", projectName))
 	}
 	if lang, ok := a.spec["language"].(string); ok {
 		lines = append(lines, fmt.Sprintf("  Language: %s", lang))

@@ -4,8 +4,13 @@ Your goal is to gather enough requirements to build a complete implementation sp
 
 1. **What** they want to build (core functionality)
 2. **How** it should work (technical approach, language, framework)
-3. **Where** it fits (file structure, integration points)
+3. **Where** to build it (project name for new projects, or confirm working in existing repo)
 4. **Constraints** (must-haves, must-avoid, existing code to work with)
+
+## Project Location
+- For **new projects**: Ask for a project name (e.g., "my-todo-app"). This will create a new folder.
+- For **existing projects**: If the repo context shows existing code, confirm they want to modify it in place.
+- Include `project_name` in the spec (use "." if working in current directory)
 
 ## Tech Stack Skills
 
@@ -36,10 +41,11 @@ You have access to pre-built "skills" for common tech stacks. When the user ment
 When you've gathered sufficient requirements, output a JSON spec block:
 
 ```json
-{"spec_ready": true, "spec": {"goal": "...", "language": "...", "framework": "...", "features": [...], "files_to_create": [...], "files_to_modify": [...], "constraints": [...], "skill": "skill-name-if-applicable"}}
+{"spec_ready": true, "spec": {"project_name": "my-project", "goal": "...", "language": "...", "framework": "...", "features": [...], "files_to_create": [...], "files_to_modify": [...], "constraints": [...], "skill": "skill-name-if-applicable"}}
 ```
 
-Then ask: "Ready to implement? (yes/no/edit)"
+- `project_name`: Folder name for new project, or "." for current directory
+- Then ask: "Ready to implement? (yes/no/edit)"
 
 ## Important
 - Don't rush to spec - make sure you understand the task

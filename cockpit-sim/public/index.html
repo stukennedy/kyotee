@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Glass Cockpit Simulator</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="cockpit-container">
+    <!-- Header Bar -->
+    <header class="cockpit-header">
+      <div class="header-left">
+        <span class="flight-id">FLT 2847</span>
+        <span class="route">KSFO → KJFK</span>
+      </div>
+      <div class="header-center">
+        <span class="ap-status" id="ap-status">AP</span>
+        <span class="at-status" id="at-status">A/T</span>
+      </div>
+      <div class="header-right">
+        <span class="utc-time" id="utc-time">--:--:--Z</span>
+      </div>
+    </header>
+
+    <!-- Main Instruments -->
+    <div class="instruments-panel">
+      <!-- Primary Flight Display (Left) -->
+      <div class="pfd-container">
+        <div class="instrument-bezel">
+          <svg id="pfd" viewBox="0 0 400 400" class="pfd">
+            <!-- Attitude Indicator -->
+            <defs>
+              <clipPath id="attitude-clip">
+                <circle cx="200" cy="180" r="140"/>
+              </clipPath>
+              <linearGradient id="sky-gradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" style="stop-color:#1a5fb4"/>
+                <stop offset="100%" style="stop-color:#62a0ea"/>
+              </linearGradient>
+              <linearGradient id="ground-gradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" style="stop-color:#8b5a2b"/>
+                <stop offset="100%" style="stop-color:#5c3d2e"/>
+              </linearGradient>
+            </defs>
+            
+            <!-- Attitude Background -->
+            <g clip-path="url(#attitude-clip)">
+              <g id="attitude-ball">
+                <rect x="0" y="0" width="400" height="180" fill="url(#sky-gradient)"/>
+                <rect x="0" y="180" width="400" height="220" fill="url(#ground-gradient)"/>
+                <line x1="0" y1="180" x2="400" y2="180" stroke="#fff" stroke-width="2"/>
+                <!-- Pitch lines -->
+                <g id="pitch-lines" fill="none" stroke="#fff" stroke-width="1">
+                  <line x1="150" y1="160" x2="250" y2="160"/>
+                  <text x="135" y="164" fill="#fff" font-size="10">10</text>
+                  <line x1="170" y1="140" x2="230" y2="140"/>
+                  <text x="155" y="144" fill="#fff" font-size="10">20</text>
+                  <line x1="150" y1="200" x2="250" y2="200"/>
+                  <text x="135" y="204" fill="#fff" font-size="10">10</text>
+                  <line x1="170" y1="220" x2="230" y2="220"/>
+                  <text x="155" y="224" fill="#fff" font-size="10">20</text>
+                </g>
+              </g>
+            </g>
+            
+            <!-- Bank Indicator -->
+            <g transform="translate(200, 180)">
+              <g id="bank-pointer" transform="rotate(0)">
+                <polygon points="0,-135 -8,-120 8,-120" fill="#fff"/>
+              </g>
+              <!-- Bank scale -->
+              <g fill="none" stroke="#fff" stroke-width="2">
+                <line x1="0" y1="-140" x2="0" y2="-145" transform="rotate(-60)"/>
+                <line x1="0" y1="-140" x2="0" y2="-145" transform="rotate(-45)"/>
+                <line x1="0" y1="-140" x2="0" y2="-148" transform="rotate(-30)"/>
+                <line x1="0" y1="-140" x2="0" y2="-145" transform="rotate(-20)"/>
+                <line x1="0" y1="-140" x2="0" y2="-145" transform="rotate(-10)"/>
+                <line x1="0" y1="-140" x2="0" y2="-148"/>
+                <line x1="0" y1="-140" x2="0" y2="-145" transform="rotate(10)"/>
+                <line x1="0" y1="-140" x2="0" y2="-145" transform="rotate(20)"/>
+                <line x1="0" y1="-140" x2="0" y2="-148" transform="rotate(30)"/>
+                <line x1="0" y1="-140" x2="0" y2="-145" transform="rotate(45)"/>
+                <line x1="0" y1="-140" x2="0" y2="-145" transform="rotate(60)"/>
+              </g>
+            </g>
+            
+            <!-- Aircraft Symbol (fixed) -->
+            <g transform="translate(200, 180)" fill="none" stroke="#ffcc00" stroke-width="3">
+              <line x1="-50" y1="0" x2="-15" y2="0"/>
+              <line x1="15" y1="0" x2="50" y2="0"/>
+              <line x1="-15" y1="0" x2="-15" y2="10"/>
+              <line x1="15" y1="0" x2="15" y2="10"/>
+              <circle cx="0" cy="0" r="5" fill="#ffcc00"/>
+            </g>
+            
+            <!-- Airspeed Tape -->
+            <rect x="20" y="80" width="60" height="200" fill="#1a1a2e" stroke="#444" stroke-width="1"/>
+            <g id="airspeed-tape" clip-path="url(#speed-clip)">
+              <defs>
+                <clipPath id="speed-clip">
+                  <rect x="20" y="80" width="60" height="200"/>
+                </clipPath>
+              </defs>
+            </g>
+            <rect x="55" y="172" width="35" height="24" fill="#000" stroke="#0f0" stroke-width="2"/>
+            <text id="airspeed-value" x="72" y="190" fill="#0f0" font-size="16" font-family="monospace" text-anchor="middle">---</text>
+            <text x="40" y="70" fill="#0f0" font-size="10" text-anchor="middle">IAS</text>
+            
+            <!-- Altitude Tape -->
+            <rect x="320" y="80" width="60" height="200" fill="#1a1a2e" stroke="#444" stroke-width="1"/>
+            <g id="altitude-tape"></g>
+            <rect x="310" y="172" width="50" height="24" fill="#000" stroke="#0f0" stroke-width="2"/>
+            <text id="altitude-value" x="335" y="190" fill="#0f0" font-size="14" font-family="monospace" text-anchor="middle">-----</text>
+            <text x="350" y="70" fill="#0f0" font-size="10" text-anchor="middle">ALT</text>
+            
+            <!-- Vertical Speed -->
+            <rect x="382" y="100" width="15" height="160" fill="#1a1a2e" stroke="#444" stroke-width="1"/>
+            <line x1="382" y1="180" x2="397" y2="180" stroke="#444"/>
+            <g id="vs-pointer">
+              <polygon points="382,180 392,175 392,185" fill="#0f0"/>
+            </g>
+            <text id="vs-value" x="350" y="305" fill="#0f0" font-size="12" font-family="monospace" text-anchor="middle">0</text>
+            <text x="350" y="320" fill="#888" font-size="9">FPM</text>
+            
+            <!-- Heading Indicator -->
+            <rect x="100" y="340" width="200" height="55" fill="#1a1a2e" stroke="#444" stroke-width="1"/>
+            <g id="heading-tape" transform="translate(200, 365)">
+              <!-- Dynamic heading tape -->
+            </g>
+            <polygon points="200,340 195,350 205,350" fill="#ffcc00"/>
+            <rect x="175" y="375" width="50" height="18" fill="#000" stroke="#0f0" stroke-width="1"/>
+            <text id="heading-value" x="200" y="389" fill="#0f0" font-size="14" font-family="monospace" text-anchor="middle">---°</text>
+            
+            <!-- Mach Number -->
+            <text id="mach-value" x="40" y="295" fill="#0f0" font-size="12" font-family="monospace">M.---</text>
+            
+            <!-- Ground Speed -->
+            <text x="40" y="310" fill="#888" font-size="9">GS</text>
+            <text id="gs-value" x="40" y="325" fill="#0f0" font-size="12" font-family="monospace">---</text>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Engine Display (Center) -->
+      <div class="engine-container">
+        <div class="instrument-bezel">
+          <svg id="eicas" viewBox="0 0 200 400" class="eicas">
+            <!-- N1 Gauges -->
+            <text x="100" y="25" fill="#0f0" font-size="14" text-anchor="middle" font-weight="bold">N1</text>
+            
+            <!-- Left Engine N1 -->
+            <g transform="translate(60, 100)">
+              <circle cx="0" cy="0" r="45" fill="none" stroke="#333" stroke-width="8"/>
+              <circle id="n1-left-arc" cx="0" cy="0" r="45" fill="none" stroke="#0f0" stroke-width="8"
+                stroke-dasharray="0 283" stroke-dashoffset="70.75" transform="rotate(-135)"/>
+              <text id="n1-left-value" x="0" y="5" fill="#0f0" font-size="18" font-family="monospace" text-anchor="middle">--.-</text>
+              <text x="0" y="20" fill="#888" font-size="10" text-anchor="middle">%</text>
+            </g>
+            
+            <!-- Right Engine N1 -->
+            <g transform="translate(140, 100)">
+              <circle cx="0" cy="0" r="45" fill="none" stroke="#333" stroke-width="8"/>
+              <circle id="n1-right-arc" cx="0" cy="0" r="45" fill="none" stroke="#0f0" stroke-width="8"
+                stroke-dasharray="0 283" stroke-dashoffset="70.75" transform="rotate(-135)"/>
+              <text id="n1-right-value" x="0" y="5" fill="#0f0" font-size="18" font-family="monospace" text-anchor="middle">--.-</text>
+              <text x="0" y="20" fill="#888" font-size="10" text-anchor="middle">%</text>
+            </g>
+            
+            <!-- EGT -->
+            <text x="100" y="170" fill="#0f0" font-size="12" text-anchor="middle">EGT °C</text>
+            <g transform="translate(60, 210)">
+              <rect x="-25" y="-30" width="50" height="40" fill="#1a1a2e" stroke="#333"/>
+              <text id="egt-left-value" x="0" y="0" fill="#0f0" font-size="16" font-family="monospace" text-anchor="middle">---</text>
+            </g>
+            <g transform="translate(140, 210)">
+              <rect x="-25" y="-30" width="50" height="40" fill="#1a1a2e" stroke="#333"/>
+              <text id="egt-right-value" x="0" y="0" fill="#0f0" font-size="16" font-family="monospace" text-anchor="middle">---</text>
+            </g>
+            
+            <!-- Fuel Flow -->
+            <text x="100" y="260" fill="#0f0" font-size="12" text-anchor="middle">FUEL LBS/HR</text>
+            <rect x="50" y="270" width="100" height="30" fill="#1a1a2e" stroke="#333"/>
+            <text id="fuel-flow-value" x="100" y="292" fill="#0f0" font-size="18" font-family="monospace" text-anchor="middle">----</text>
+            
+            <!-- Throttle Position -->
+            <text x="100" y="330" fill="#888" font-size="10" text-anchor="middle">THR</text>
+            <rect x="40" y="340" width="120" height="15" fill="#1a1a2e" stroke="#333"/>
+            <rect id="throttle-bar" x="40" y="340" width="0" height="15" fill="#0f0"/>
+            <text id="throttle-value" x="100" y="370" fill="#0f0" font-size="12" font-family="monospace" text-anchor="middle">--%</text>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Navigation Display (Right) -->
+      <div class="nd-container">
+        <div class="instrument-bezel">
+          <svg id="nd" viewBox="0 0 400 400" class="nd">
+            <!-- Compass Rose -->
+            <circle cx="200" cy="200" r="150" fill="#1a1a2e" stroke="#333" stroke-width="2"/>
+            <g id="compass-rose" transform="translate(200, 200)">
+              <!-- Cardinal markers -->
+            </g>
+            
+            <!-- Aircraft Symbol -->
+            <g transform="translate(200, 200)" fill="#fff" stroke="#fff" stroke-width="2">
+              <line x1="0" y1="-20" x2="0" y2="20"/>
+              <line x1="-15" y1="5" x2="15" y2="5"/>
+              <line x1="-8" y1="15" x2="8" y2="15"/>
+            </g>
+            
+            <!-- Heading Bug -->
+            <g id="heading-bug" transform="translate(200, 200) rotate(0)">
+              <polygon points="0,-145 -8,-155 8,-155" fill="#ff00ff"/>
+            </g>
+            
+            <!-- Wind Info -->
+            <g transform="translate(50, 50)">
+              <text x="0" y="0" fill="#0ff" font-size="10">WIND</text>
+              <text id="wind-dir" x="0" y="15" fill="#0ff" font-size="12" font-family="monospace">---°</text>
+              <text id="wind-spd" x="0" y="30" fill="#0ff" font-size="12" font-family="monospace">--KT</text>
+            </g>
+            
+            <!-- True Airspeed -->
+            <g transform="translate(300, 50)">
+              <text x="0" y="0" fill="#0f0" font-size="10">TAS</text>
+              <text id="tas-value" x="0" y="15" fill="#0f0" font-size="12" font-family="monospace">---KT</text>
+            </g>
+            
+            <!-- Temperature -->
+            <g transform="translate(300, 350)">
+              <text x="0" y="0" fill="#0f0" font-size="10">SAT</text>
+              <text id="sat-value" x="0" y="15" fill="#0f0" font-size="12" font-family="monospace">---°C</text>
+            </g>
+            
+            <!-- Current Heading Display -->
+            <rect x="165" y="30" width="70" height="25" fill="#000" stroke="#0f0" stroke-width="1"/>
+            <text id="nd-heading" x="200" y="48" fill="#0f0" font-size="16" font-family="monospace" text-anchor="middle">---°</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Control Panel -->
+    <div class="control-panel">
+      <div class="control-group">
+        <label>THROTTLE</label>
+        <input type="range" id="throttle-control" min="0" max="100" value="72">
+        <span id="throttle-display">72%</span>
+      </div>
+      
+      <div class="control-group">
+        <label>PITCH</label>
+        <input type="range" id="pitch-control" min="-15" max="20" value="2">
+        <span id="pitch-display">2°</span>
+      </div>
+      
+      <div class="control-group">
+        <label>HEADING</label>
+        <input type="range" id="heading-control" min="0" max="359" value="270">
+        <span id="heading-display">270°</span>
+      </div>
+      
+      <div class="control-group buttons">
+        <button id="ap-toggle" class="active">A/P</button>
+        <button id="at-toggle" class="active">A/T</button>
+      </div>
+      
+      <div class="status-group">
+        <span id="connection-status" class="connected">● CONNECTED</span>
+        <span id="clients-count">1 client(s)</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="cockpit.js"></script>
+</body>
+</html>

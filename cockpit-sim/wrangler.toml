@@ -1,0 +1,16 @@
+name = "cockpit-sim"
+main = "src/index.ts"
+compatibility_date = "2024-12-05"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "FLIGHT_SIM", class_name = "FlightSimulator" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["FlightSimulator"]
+
+[assets]
+directory = "./public"
