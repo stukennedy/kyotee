@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 	"github.com/stukennedy/kyotee/internal/orchestrator"
 )
 
@@ -311,14 +312,45 @@ func (a *App) updateChatViewport() {
 		return
 	}
 
+	// Calculate available width for content (viewport - padding - prefix space)
+	// ChatBox has padding of 2 on each side, plus border, and prefix like "You: " or "🐺 "
+	contentWidth := a.chatVP.Width - 6 // Leave room for prefix
+	if contentWidth < 20 {
+		contentWidth = 20
+	}
+
 	var b strings.Builder
 	for _, msg := range a.messages {
 		if msg.role == "user" {
-			b.WriteString(UserMsgStyle.Render("You: "))
-			b.WriteString(UserContentStyle.Render(msg.content))
+			prefix := UserMsgStyle.Render("You: ")
+			b.WriteString(prefix)
+			// Word-wrap the content and indent continuation lines
+			wrapped := wordwrap.String(msg.content, contentWidth)
+			lines := strings.Split(wrapped, "\n")
+			for i, line := range lines {
+				if i > 0 {
+					b.WriteString("      ") // Indent to align with first line
+				}
+				b.WriteString(UserContentStyle.Render(line))
+				if i < len(lines)-1 {
+					b.WriteString("\n")
+				}
+			}
 		} else {
-			b.WriteString(AssistantMsgStyle.Render("🐺 "))
-			b.WriteString(AssistantContentStyle.Render(msg.content))
+			prefix := AssistantMsgStyle.Render("🐺 ")
+			b.WriteString(prefix)
+			// Word-wrap the content and indent continuation lines
+			wrapped := wordwrap.String(msg.content, contentWidth)
+			lines := strings.Split(wrapped, "\n")
+			for i, line := range lines {
+				if i > 0 {
+					b.WriteString("   ") // Indent to align with first line (emoji is ~2 chars)
+				}
+				b.WriteString(AssistantContentStyle.Render(line))
+				if i < len(lines)-1 {
+					b.WriteString("\n")
+				}
+			}
 		}
 		b.WriteString("\n\n")
 	}
@@ -375,7 +407,7 @@ func (a App) viewDiscovery() string {
 	b.WriteString("\n")
 
 	// Help
-	help := "Enter: send • Alt+Enter: newline • Esc: quit"
+	help := "Enter: send • Cmd/Alt+Enter: newline • Esc: quit"
 	if a.specReady {
 		help = "Type 'yes' to start building • " + help
 	}
