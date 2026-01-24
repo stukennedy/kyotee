@@ -4,7 +4,3 @@
 
 # Runtime
 agent/runs/
-
-# Python
-__pycache__/
-*.pyc
