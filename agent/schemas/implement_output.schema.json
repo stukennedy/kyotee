@@ -2,19 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["phase", "changes", "notes", "evidence"],
+  "required": ["phase", "files", "notes", "evidence"],
   "properties": {
     "phase": { "const": "implement" },
-    "changes": {
+    "files": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "change_type", "summary"],
+        "required": ["path", "action", "content"],
         "properties": {
           "path": { "type": "string", "minLength": 1 },
-          "change_type": { "enum": ["added", "modified", "deleted"] },
-          "summary": { "type": "string", "minLength": 1 }
+          "action": { "enum": ["create", "modify", "delete"] },
+          "content": { "type": "string", "description": "Full file content for create/modify, empty for delete" }
         }
       }
     },

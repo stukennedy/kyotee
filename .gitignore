@@ -1,0 +1,10 @@
+# Build artifacts
+/kyotee
+*.exe
+
+# Runtime
+agent/runs/
+
+# Python
+__pycache__/
+*.pyc
