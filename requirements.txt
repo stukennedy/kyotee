@@ -1,0 +1,2 @@
+toml>=0.10.2
+jsonschema>=4.17.0

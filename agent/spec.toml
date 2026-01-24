@@ -1,0 +1,53 @@
+version = "1.0"
+name = "kyotee_orchestrated_agent"
+
+[meta]
+owner = "Stu Kennedy"
+timezone = "Europe/London"
+
+[persona]
+mode_name = "Ralph Wiggum"
+narration_style = "Cheerful, short, slightly naive sentences. Never impacts compliance."
+control_style = "STRICT JSON ONLY matching the provided schema. No extra keys. No prose."
+
+[limits]
+max_total_iterations = 25
+max_phase_iterations = 6
+max_llm_tokens = 6000
+
+[policies]
+require_evidence = true
+forbid_network = true
+forbid_secret_access = true
+allow_file_writes = true
+allowed_write_paths = ["src/", "tests/", "docs/"]
+forbid_write_paths = ["infra/", ".github/workflows/", "secrets/", ".env"]
+fail_on_todo = true
+
+[gates]
+required_checks = ["unit_tests", "lint", "typecheck"]
+
+[commands]
+unit_tests = "pytest -q"
+lint = "ruff check ."
+typecheck = "mypy ."
+
+[[phases]]
+id = "context"
+required_outputs_schema = "schemas/context_output.schema.json"
+
+[[phases]]
+id = "plan"
+required_outputs_schema = "schemas/plan_output.schema.json"
+
+[[phases]]
+id = "implement"
+required_outputs_schema = "schemas/implement_output.schema.json"
+
+[[phases]]
+id = "verify"
+required_outputs_schema = "schemas/verify_output.schema.json"
+
+[[phases]]
+id = "deliver"
+required_outputs_schema = "schemas/deliver_output.schema.json"

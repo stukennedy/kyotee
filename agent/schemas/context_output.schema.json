@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["phase", "context_pack", "unknowns", "evidence"],
+  "properties": {
+    "phase": { "const": "context" },
+    "context_pack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "relevant_files", "assumptions"],
+      "properties": {
+        "summary": { "type": "string", "minLength": 1 },
+        "relevant_files": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "assumptions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "ref", "note"],
+        "properties": {
+          "kind": { "enum": ["file", "command_output"] },
+          "ref": { "type": "string", "minLength": 1 },
+          "note": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "narration": { "type": "string" }
+  }
+}
