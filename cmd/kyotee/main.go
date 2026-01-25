@@ -110,8 +110,10 @@ func ensureInitialized(cmd *cobra.Command, args []string) error {
 
 // runDiscovery starts the interactive discovery mode
 func runDiscovery(cmd *cobra.Command, args []string) error {
-	app := tui.NewApp(appPaths.UserDir, appPaths.WorkDir)
-	p := tea.NewProgram(app, tea.WithAltScreen())
+	// Use NewAppForProject to enable state persistence
+	app := tui.NewAppForProject(appPaths.UserDir, appPaths.WorkDir)
+	p := tea.NewProgram(&app, tea.WithAltScreen())
+	app.SetProgram(p)
 
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)

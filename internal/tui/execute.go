@@ -100,9 +100,9 @@ func RenderExecuteView(state *ExecuteState, width, selectedIdx int, spinner stri
 	// Footer with controls
 	b.WriteString("\n")
 	if state.Paused {
-		b.WriteString(HelpStyle.Render("PAUSED - r: resume • q: quit • ↑↓: navigate • enter: expand/collapse"))
+		b.WriteString(WarningStyle.Render("⏸ PAUSED") + HelpStyle.Render(" • r: resume • q: quit • ↑↓: select • j/k: scroll • enter: expand"))
 	} else {
-		b.WriteString(HelpStyle.Render("p: pause • q: quit • ↑↓: navigate • enter: expand/collapse"))
+		b.WriteString(HelpStyle.Render("p: pause • q: quit • ↑↓: select • j/k: scroll • enter: expand"))
 	}
 
 	return b.String()
@@ -129,10 +129,10 @@ func renderPhase(phase *PhaseProgress, width int, selected bool, spinner string)
 		style = PhaseFailedStyle
 	}
 
-	// Selection indicator
+	// Selection indicator with color
 	selector := "  "
 	if selected {
-		selector = "› "
+		selector = SelectedStyle.Render("› ")
 	}
 
 	// Expand/collapse indicator
@@ -182,17 +182,22 @@ func renderPhase(phase *PhaseProgress, width int, selected bool, spinner string)
 			}
 		}
 
-		// File changes
+		// File changes with colored icons
 		if len(phase.Files) > 0 {
 			b.WriteString(OutputTextStyle.Render("      Files:\n"))
 			for _, f := range phase.Files {
-				icon := "+"
-				if f.Action == "modify" {
-					icon = "~"
-				} else if f.Action == "delete" {
-					icon = "-"
+				var styled string
+				switch f.Action {
+				case "create":
+					styled = FileAddStyle.Render(fmt.Sprintf("+ %s", f.Path))
+				case "modify":
+					styled = FileModifyStyle.Render(fmt.Sprintf("~ %s", f.Path))
+				case "delete":
+					styled = FileDeleteStyle.Render(fmt.Sprintf("- %s", f.Path))
+				default:
+					styled = OutputTextStyle.Render(fmt.Sprintf("• %s", f.Path))
 				}
-				b.WriteString(OutputTextStyle.Render(fmt.Sprintf("        %s %s\n", icon, f.Path)))
+				b.WriteString(fmt.Sprintf("        %s\n", styled))
 			}
 		}
 

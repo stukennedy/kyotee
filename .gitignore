@@ -4,3 +4,7 @@
 
 # Runtime
 agent/runs/
+
+# Project state (created when running kyotee in a directory)
+.kyotee/
+.playwright-mcp/

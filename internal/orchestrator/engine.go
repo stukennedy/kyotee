@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,9 @@ import (
 	"github.com/stukennedy/kyotee/internal/config"
 	"github.com/stukennedy/kyotee/internal/types"
 )
+
+// ErrPaused is returned when execution is paused
+var ErrPaused = fmt.Errorf("execution paused")
 
 // LoadSpecWithOverrides loads spec and applies overrides from discovery
 func LoadSpecWithOverrides(agentDir string, overrides map[string]any) (*types.Spec, error) {
@@ -41,11 +45,17 @@ type Engine struct {
 	OnNarrate func(text string)
 }
 
-// NewEngine creates a new orchestrator engine
+// NewEngine creates a new orchestrator engine with auto-generated run directory
 func NewEngine(spec *types.Spec, task, repoRoot, agentDir string) (*Engine, error) {
-	// Create run directory
+	// Create run directory in agentDir/runs
 	ts := time.Now().Format("20060102-150405")
 	runDir := filepath.Join(agentDir, "runs", ts)
+	return NewEngineWithRunDir(spec, task, repoRoot, agentDir, runDir)
+}
+
+// NewEngineWithRunDir creates an engine with a specific run directory
+// This is used when storing phase outputs in project-local .kyotee/phases/
+func NewEngineWithRunDir(spec *types.Spec, task, repoRoot, agentDir, runDir string) (*Engine, error) {
 	if err := os.MkdirAll(runDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create run dir: %w", err)
 	}
@@ -81,9 +91,21 @@ func NewEngine(spec *types.Spec, task, repoRoot, agentDir string) (*Engine, erro
 	}, nil
 }
 
-// Run executes the orchestration loop
+// Run executes the orchestration loop without context (uses background context)
 func (e *Engine) Run() error {
+	return e.RunWithContext(context.Background())
+}
+
+// RunWithContext executes the orchestration loop with cancellation support
+func (e *Engine) RunWithContext(ctx context.Context) error {
 	for e.State.CurrentPhase < len(e.State.Phases) {
+		// Check for cancellation at the start of each phase
+		select {
+		case <-ctx.Done():
+			return ErrPaused
+		default:
+		}
+
 		if e.State.TotalIterations >= e.Spec.Limits.MaxTotalIterations {
 			return fmt.Errorf("reached max total iterations (%d)", e.Spec.Limits.MaxTotalIterations)
 		}
@@ -103,7 +125,7 @@ func (e *Engine) Run() error {
 		}
 
 		// Execute phase
-		if err := e.executePhase(phase); err != nil {
+		if err := e.executePhaseWithContext(ctx, phase); err != nil {
 			phase.Status = types.PhaseFailed
 			phase.Error = err
 			if e.OnPhase != nil {
@@ -139,7 +161,7 @@ func (e *Engine) Run() error {
 	return nil
 }
 
-func (e *Engine) executePhase(phase *types.PhaseState) error {
+func (e *Engine) executePhaseWithContext(ctx context.Context, phase *types.PhaseState) error {
 	// Build prompt
 	prompt, err := e.buildPrompt(phase.Phase.ID, phase.Phase.SchemaPath)
 	if err != nil {
@@ -152,8 +174,8 @@ func (e *Engine) executePhase(phase *types.PhaseState) error {
 		return fmt.Errorf("failed to create phase dir: %w", err)
 	}
 
-	// Call worker
-	output, err := e.callWorker(prompt, phase.Phase.ID)
+	// Call worker with context for cancellation support
+	output, err := e.callWorkerWithContext(ctx, prompt, phase.Phase.ID)
 	if err != nil {
 		return fmt.Errorf("worker failed: %w", err)
 	}
@@ -291,12 +313,20 @@ func (e *Engine) buildPrompt(phaseID, schemaPath string) (string, error) {
 }
 
 func (e *Engine) callWorker(prompt, phaseID string) (string, error) {
-	cmd := exec.Command("claude", "-p")
+	return e.callWorkerWithContext(context.Background(), prompt, phaseID)
+}
+
+func (e *Engine) callWorkerWithContext(ctx context.Context, prompt, phaseID string) (string, error) {
+	cmd := exec.CommandContext(ctx, "claude", "-p")
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Dir = e.RepoRoot
 
 	output, err := cmd.Output()
 	if err != nil {
+		// Check if it was cancelled
+		if ctx.Err() == context.Canceled {
+			return "", ErrPaused
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("claude exited with code %d: %s", exitErr.ExitCode(), string(exitErr.Stderr))
 		}

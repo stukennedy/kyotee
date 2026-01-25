@@ -2,17 +2,20 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Cyberpunk color palette
+// Cyberpunk color palette - vibrant neon colors
 var (
-	Primary   = lipgloss.Color("#00ff9f") // Neon green - success, active
-	Secondary = lipgloss.Color("#00d4ff") // Cyan - info, headers
-	Accent    = lipgloss.Color("#ff00ff") // Magenta - highlights
-	Warning   = lipgloss.Color("#ffaa00") // Amber - warnings
-	Error     = lipgloss.Color("#ff3366") // Red-pink - errors
-	Muted     = lipgloss.Color("#4a4a5a") // Gray - inactive
-	Dim       = lipgloss.Color("#2a2a3a") // Darker gray
-	Bg        = lipgloss.Color("#0a0a0f") // Near-black background
-	Text      = lipgloss.Color("#e0e0e0") // Light text
+	Primary    = lipgloss.Color("#00ff9f") // Neon green - success, active
+	Secondary  = lipgloss.Color("#00d4ff") // Cyan - info, headers
+	Accent     = lipgloss.Color("#ff00ff") // Magenta - highlights
+	Warning    = lipgloss.Color("#ffaa00") // Amber - warnings, running
+	Error      = lipgloss.Color("#ff3366") // Red-pink - errors
+	Muted      = lipgloss.Color("#6a6a7a") // Gray - inactive (brighter)
+	Dim        = lipgloss.Color("#3a3a4a") // Darker gray
+	Bg         = lipgloss.Color("#0a0a0f") // Near-black background
+	Text       = lipgloss.Color("#e0e0e0") // Light text
+	FileAdd    = lipgloss.Color("#00ff9f") // Green for new files
+	FileModify = lipgloss.Color("#ffaa00") // Amber for modified
+	FileDelete = lipgloss.Color("#ff3366") // Red for deleted
 )
 
 // Styles
@@ -34,17 +37,34 @@ var (
 			Padding(1, 2)
 
 	PhaseActiveStyle = lipgloss.NewStyle().
-				Foreground(Primary).
+				Foreground(Warning).
 				Bold(true)
 
 	PhasePendingStyle = lipgloss.NewStyle().
 				Foreground(Muted)
 
 	PhasePassedStyle = lipgloss.NewStyle().
-				Foreground(Primary)
+				Foreground(Primary).
+				Bold(true)
 
 	PhaseFailedStyle = lipgloss.NewStyle().
-				Foreground(Error)
+				Foreground(Error).
+				Bold(true)
+
+	// Selection highlight
+	SelectedStyle = lipgloss.NewStyle().
+			Foreground(Secondary).
+			Bold(true)
+
+	// File change styles
+	FileAddStyle = lipgloss.NewStyle().
+			Foreground(FileAdd)
+
+	FileModifyStyle = lipgloss.NewStyle().
+			Foreground(FileModify)
+
+	FileDeleteStyle = lipgloss.NewStyle().
+			Foreground(FileDelete)
 
 	// Output viewport
 	OutputPanelStyle = lipgloss.NewStyle().
@@ -74,6 +94,11 @@ var (
 	// Spinner
 	SpinnerStyle = lipgloss.NewStyle().
 			Foreground(Primary)
+
+	// Warning/Running style
+	WarningStyle = lipgloss.NewStyle().
+			Foreground(Warning).
+			Bold(true)
 
 	// Symbols
 	SymbolPending = PhasePendingStyle.Render("○")

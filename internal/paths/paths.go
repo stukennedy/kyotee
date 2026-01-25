@@ -14,15 +14,14 @@ const (
 
 // Paths holds resolved paths for the application
 type Paths struct {
-	// User-level paths (~/.kyotee/)
+	// User-level paths (~/.kyotee/) - global config only
 	UserDir     string // ~/.kyotee
 	UserConfig  string // ~/.kyotee/config.toml
 	UserSkills  string // ~/.kyotee/skills
-	UserRuns    string // ~/.kyotee/runs
 	UserPrompts string // ~/.kyotee/prompts
 	UserSchemas string // ~/.kyotee/schemas
 
-	// Project-level paths (<cwd>/.kyotee/)
+	// Project-level paths (<cwd>/.kyotee/) - all state for this instance
 	ProjectDir    string // <cwd>/.kyotee (may not exist)
 	ProjectConfig string // <cwd>/.kyotee/spec.toml
 	ProjectSkills string // <cwd>/.kyotee/skills
@@ -49,15 +48,14 @@ func Resolve() (*Paths, error) {
 	projectDir := filepath.Join(cwd, ProjectDir)
 
 	return &Paths{
-		// User paths
+		// User paths - global config only
 		UserDir:     userDir,
 		UserConfig:  filepath.Join(userDir, "config.toml"),
 		UserSkills:  filepath.Join(userDir, "skills"),
-		UserRuns:    filepath.Join(userDir, "runs"),
 		UserPrompts: filepath.Join(userDir, "prompts"),
 		UserSchemas: filepath.Join(userDir, "schemas"),
 
-		// Project paths
+		// Project paths - all state for this instance
 		ProjectDir:    projectDir,
 		ProjectConfig: filepath.Join(projectDir, "spec.toml"),
 		ProjectSkills: filepath.Join(projectDir, "skills"),
@@ -72,7 +70,6 @@ func (p *Paths) EnsureUserDir() error {
 	dirs := []string{
 		p.UserDir,
 		p.UserSkills,
-		p.UserRuns,
 		p.UserPrompts,
 		p.UserSchemas,
 	}

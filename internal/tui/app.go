@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +16,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/reflow/wordwrap"
 	"github.com/stukennedy/kyotee/internal/orchestrator"
+	"github.com/stukennedy/kyotee/internal/project"
+	"github.com/stukennedy/kyotee/internal/types"
 )
 
 // AppMode represents the current mode
@@ -31,17 +35,20 @@ type (
 		Content string
 		Err     error
 	}
-	ExecuteStartMsg  struct{}
-	ExecuteDoneMsg   struct{ Err error }
-	PhaseStartMsg    struct{ PhaseID string }
-	PhaseEndMsg      struct{ PhaseID string; Passed bool }
-	PhaseOutputMsg   struct{ PhaseID string; Line string }
-	FileChangeMsg    struct{ PhaseID string; Path string; Action string }
-	GateStartMsg     struct{ PhaseID string; GateName string }
-	GateEndMsg       struct{ PhaseID string; GateName string; Passed bool }
-	NarrationMsg     struct{ Text string }
-	PauseMsg         struct{}
-	ResumeMsg        struct{}
+	ExecuteStartMsg   struct{}
+	ExecuteDoneMsg    struct{ Err error }
+	PhaseStartMsg     struct{ PhaseID string }
+	PhaseEndMsg       struct{ PhaseID string; Passed bool }
+	PhaseOutputMsg    struct{ PhaseID string; Line string }
+	FileChangeMsg     struct{ PhaseID string; Path string; Action string }
+	GateStartMsg      struct{ PhaseID string; GateName string }
+	GateEndMsg        struct{ PhaseID string; GateName string; Passed bool }
+	NarrationMsg      struct{ Text string }
+	PauseMsg          struct{}
+	ResumeMsg         struct{}
+	AutonomousOutput  struct{ Text string }
+	AutonomousToolMsg struct{ Name string; Input any }
+	FolderSelectedMsg struct{ Path string; IsNew bool }
 )
 
 // App is the main TUI application
@@ -52,12 +59,14 @@ type App struct {
 	repoRoot  string
 
 	// Discovery mode
-	messages  []chatMessage
-	input     textarea.Model
-	chatVP    viewport.Model
-	spec      map[string]any
-	specReady bool
-	waiting   bool
+	messages     []chatMessage
+	input        textarea.Model
+	chatVP       viewport.Model
+	spec         map[string]any
+	specReady    bool
+	askingFolder bool     // Asking user about project folder location
+	projectName  string   // Derived from spec for folder name suggestion
+	waiting      bool
 
 	// Execute mode
 	execState   *ExecuteState
@@ -65,6 +74,14 @@ type App struct {
 	execVP      viewport.Model
 	spinner     spinner.Model
 	cancelExec  func() // Function to cancel execution
+	autonomous  bool   // Use autonomous execution with direct API calls
+
+	// Autonomous mode output
+	autonomousOutput []string
+
+	// State persistence
+	proj    *project.Project // Project state in .kyotee/
+	program *tea.Program
 
 	// Shared
 	width  int
@@ -105,6 +122,102 @@ func NewApp(agentDir, repoRoot string) App {
 		input:     ti,
 		spinner:   s,
 	}
+}
+
+// NewAppForProject creates an application with state persistence in local .kyotee/
+// - Opens or creates .kyotee/ in current directory
+// - Loads existing conversation and spec
+// - Auto-resumes most recent unfinished job
+func NewAppForProject(agentDir, repoRoot string) App {
+	ti := textarea.New()
+	ti.Placeholder = "What would you like to build?"
+	ti.Focus()
+	ti.CharLimit = 2000
+	ti.SetHeight(3)
+	ti.ShowLineNumbers = false
+
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = SpinnerStyle
+
+	discovery := orchestrator.NewDiscovery(agentDir, repoRoot)
+
+	// Open or create .kyotee/ in current directory
+	proj, err := project.Open(repoRoot)
+	if err != nil {
+		// Fall back to basic app without persistence
+		return App{
+			mode:      ModeDiscovery,
+			discovery: discovery,
+			agentDir:  agentDir,
+			repoRoot:  repoRoot,
+			messages: []chatMessage{
+				{role: "assistant", content: "Hey! I'm Kyotee. What would you like to build today?\n\nTell me about your project and I'll help figure out the details."},
+			},
+			input:   ti,
+			spinner: s,
+		}
+	}
+
+	// Load existing messages from project
+	messages := []chatMessage{
+		{role: "assistant", content: "Hey! I'm Kyotee. What would you like to build today?\n\nTell me about your project and I'll help figure out the details."},
+	}
+
+	if proj.HasConversation() {
+		messages = []chatMessage{}
+		for _, m := range proj.Conversation.Messages {
+			messages = append(messages, chatMessage{
+				role:    m.Role,
+				content: m.Content,
+			})
+		}
+	}
+
+	// Load existing spec
+	var spec map[string]any
+	specReady := false
+	if proj.HasSpec() {
+		spec = proj.Spec.Raw
+		specReady = true
+	}
+
+	app := App{
+		mode:      ModeDiscovery,
+		discovery: discovery,
+		agentDir:  agentDir,
+		repoRoot:  repoRoot,
+		messages:  messages,
+		input:     ti,
+		spinner:   s,
+		proj:      proj,
+		spec:      spec,
+		specReady: specReady,
+	}
+
+	// Auto-resume if there's an unfinished job
+	if proj.CanResume() {
+		app.mode = ModeExecute
+		app.execState = &ExecuteState{
+			ProjectName: proj.Spec.ProjectName,
+			Task:        proj.Spec.Goal,
+			StartTime:   proj.Job.StartedAt,
+			Paused:      proj.Job.Status == project.JobStatusPaused,
+		}
+		for _, p := range proj.Job.Phases {
+			app.execState.Phases = append(app.execState.Phases, PhaseProgress{
+				ID:     p.ID,
+				Status: p.Status,
+			})
+		}
+	}
+
+	return app
+}
+
+// SetProgram sets the tea.Program reference for sending messages
+func (a *App) SetProgram(p *tea.Program) {
+	a.program = p
 }
 
 // NewAppWithJob creates an application to resume an existing job
@@ -172,29 +285,71 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Discovery messages
 	case ResponseMsg:
 		a.waiting = false
+		var content string
 		if msg.Err != nil {
-			a.messages = append(a.messages, chatMessage{
-				role:    "assistant",
-				content: fmt.Sprintf("Error: %v", msg.Err),
-			})
+			content = fmt.Sprintf("Error: %v", msg.Err)
 		} else {
-			a.messages = append(a.messages, chatMessage{
-				role:    "assistant",
-				content: msg.Content,
-			})
+			content = msg.Content
+		}
+		a.messages = append(a.messages, chatMessage{
+			role:    "assistant",
+			content: content,
+		})
+		// Save to project
+		if a.proj != nil {
+			a.proj.AddMessage("assistant", content)
 		}
 		a.updateChatViewport()
 
 		if a.discovery.IsSpecReady() {
 			a.spec = a.discovery.GetSpec()
 			a.specReady = true
+			// Save spec to project
+			if a.proj != nil {
+				a.proj.SetSpec(a.spec)
+			}
 		}
+
+	// Folder selection
+	case FolderSelectedMsg:
+		a.askingFolder = false
+		if msg.IsNew {
+			// Create new folder and move .kyotee there
+			if err := setupProjectFolder(&a, msg.Path); err != nil {
+				a.messages = append(a.messages, chatMessage{
+					role:    "assistant",
+					content: fmt.Sprintf("Error creating folder: %v", err),
+				})
+				a.updateChatViewport()
+				return a, nil
+			}
+			a.repoRoot = msg.Path
+			a.messages = append(a.messages, chatMessage{
+				role:    "assistant",
+				content: fmt.Sprintf("Created %s/\nStarting build...", a.projectName),
+			})
+		} else {
+			// Use current folder, just create CLAUDE.md
+			createClaudeMD(msg.Path)
+			a.messages = append(a.messages, chatMessage{
+				role:    "assistant",
+				content: "Starting build in current folder...",
+			})
+		}
+		a.updateChatViewport()
+		return a, func() tea.Msg { return ExecuteStartMsg{} }
 
 	// Execute messages
 	case ExecuteStartMsg:
 		a.mode = ModeExecute
-		a.initExecuteState()
-		cmds = append(cmds, a.runExecute())
+		a.autonomous = true // Always use autonomous mode after discovery
+		if a.autonomous {
+			a.autonomousOutput = []string{"🚀 Starting autonomous execution...\n\n"}
+			cmds = append(cmds, a.spinner.Tick, a.runAutonomous())
+		} else {
+			a.initExecuteState()
+			cmds = append(cmds, a.runExecute())
+		}
 
 	case PhaseStartMsg:
 		if a.execState != nil {
@@ -311,6 +466,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.execState.Paused = false
 			cmds = append(cmds, a.runExecute())
 		}
+
+	case AutonomousOutput:
+		a.autonomousOutput = append(a.autonomousOutput, msg.Text)
+		// Auto-scroll to bottom
+		if a.ready {
+			content := strings.Join(a.autonomousOutput, "")
+			wrapped := wordwrap.String(content, a.execVP.Width-2)
+			a.execVP.SetContent(wrapped)
+			a.execVP.GotoBottom()
+		}
+
+	case AutonomousToolMsg:
+		// Log tool call to output
+		a.autonomousOutput = append(a.autonomousOutput, fmt.Sprintf("🔧 %s\n", msg.Name))
 	}
 
 	// Update textarea when in discovery mode
@@ -333,7 +502,14 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyEsc:
 		if a.mode == ModeExecute {
-			// In execute mode, Esc pauses or quits if done
+			// In autonomous mode, cancel and quit
+			if a.autonomous {
+				if a.cancelExec != nil {
+					a.cancelExec()
+				}
+				return a, tea.Quit
+			}
+			// In legacy execute mode, Esc pauses or quits if done
 			if a.execState != nil && (a.execState.Error != nil || a.allPhasesDone()) {
 				return a, tea.Quit
 			}
@@ -356,17 +532,79 @@ func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *App) handleDiscoveryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
-	case tea.KeyEnter:
-		if msg.Alt {
-			var cmd tea.Cmd
-			a.input, cmd = a.input.Update(msg)
-			return a, cmd
+	case tea.KeyCtrlJ:
+		// Ctrl+J inserts a newline (works in most terminals)
+		if !a.waiting {
+			a.input.InsertString("\n")
+		}
+		return a, nil
+
+	case tea.KeyPgUp:
+		// Scroll chat viewport up
+		a.chatVP, _ = a.chatVP.Update(msg)
+		return a, nil
+
+	case tea.KeyPgDown:
+		// Scroll chat viewport down
+		a.chatVP, _ = a.chatVP.Update(msg)
+		return a, nil
+
+	case tea.KeyUp:
+		// Scroll up with arrow key when waiting (can't type)
+		if a.waiting {
+			a.chatVP, _ = a.chatVP.Update(msg)
+			return a, nil
 		}
 
+	case tea.KeyDown:
+		// Scroll down with arrow key when waiting
+		if a.waiting {
+			a.chatVP, _ = a.chatVP.Update(msg)
+			return a, nil
+		}
+
+	case tea.KeyEnter:
+		// Enter sends the message
 		input := strings.TrimSpace(strings.ToLower(a.input.Value()))
+
+		// Handle folder selection
+		if a.askingFolder {
+			a.input.Reset()
+			switch input {
+			case "1", "here", "current":
+				// Use current folder
+				return a, func() tea.Msg {
+					return FolderSelectedMsg{Path: a.repoRoot, IsNew: false}
+				}
+			case "2", "new", "child":
+				// Create new child folder
+				newPath := filepath.Join(a.repoRoot, a.projectName)
+				return a, func() tea.Msg {
+					return FolderSelectedMsg{Path: newPath, IsNew: true}
+				}
+			default:
+				// Invalid input, show options again
+				a.messages = append(a.messages, chatMessage{
+					role:    "assistant",
+					content: "Please enter 1 (current folder) or 2 (new folder):",
+				})
+				a.updateChatViewport()
+				return a, nil
+			}
+		}
+
+		// Spec approved - ask about folder location
 		if a.specReady && (input == "yes" || input == "y") {
 			a.input.Reset()
-			return a, func() tea.Msg { return ExecuteStartMsg{} }
+			a.askingFolder = true
+			// Extract project name from spec for folder suggestion
+			a.projectName = a.getProjectNameFromSpec()
+			a.messages = append(a.messages, chatMessage{
+				role:    "assistant",
+				content: fmt.Sprintf("Where should I create the project?\n\n  1) Here (current folder: %s)\n  2) New folder: %s/\n\nEnter 1 or 2:", filepath.Base(a.repoRoot), a.projectName),
+			})
+			a.updateChatViewport()
+			return a, nil
 		}
 
 		if !a.waiting && strings.TrimSpace(a.input.Value()) != "" {
@@ -375,6 +613,10 @@ func (a *App) handleDiscoveryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				role:    "user",
 				content: userMsg,
 			})
+			// Save to project
+			if a.proj != nil {
+				a.proj.AddMessage("user", userMsg)
+			}
 			a.input.Reset()
 			a.waiting = true
 			a.updateChatViewport()
@@ -402,6 +644,12 @@ func (a *App) handleExecuteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.execState != nil && a.selectedIdx < len(a.execState.Phases)-1 {
 			a.selectedIdx++
 		}
+	case tea.KeyPgUp:
+		// Scroll viewport up
+		a.execVP, _ = a.execVP.Update(msg)
+	case tea.KeyPgDown:
+		// Scroll viewport down
+		a.execVP, _ = a.execVP.Update(msg)
 	case tea.KeyEnter:
 		// Toggle expand/collapse
 		if a.execState != nil && a.selectedIdx < len(a.execState.Phases) {
@@ -409,6 +657,16 @@ func (a *App) handleExecuteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyRunes:
 		switch string(msg.Runes) {
+		case "j":
+			// Scroll down
+			for i := 0; i < 3; i++ {
+				a.execVP, _ = a.execVP.Update(tea.KeyMsg{Type: tea.KeyDown})
+			}
+		case "k":
+			// Scroll up
+			for i := 0; i < 3; i++ {
+				a.execVP, _ = a.execVP.Update(tea.KeyMsg{Type: tea.KeyUp})
+			}
 		case "p":
 			if a.execState != nil && !a.execState.Paused {
 				return a, func() tea.Msg { return PauseMsg{} }
@@ -453,27 +711,41 @@ func (a *App) initExecuteState() {
 }
 
 func (a *App) runExecute() tea.Cmd {
+	// Create a cancellable context for pause support
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancelExec = cancel
+
+	// Capture program reference for sending updates
+	program := a.program
+
 	return func() tea.Msg {
 		task := a.buildTaskFromSpec()
 
-		// Determine project directory
-		projectRoot := a.repoRoot
-		projectName := "."
-		if pn, ok := a.spec["project_name"].(string); ok && pn != "" && pn != "." {
-			projectName = pn
-			projectRoot = filepath.Join(a.repoRoot, projectName)
-			if err := os.MkdirAll(projectRoot, 0755); err != nil {
-				return ExecuteDoneMsg{Err: fmt.Errorf("failed to create project directory: %w", err)}
-			}
+		// Use the project from the app (already opened in NewAppForProject)
+		proj := a.proj
+		if proj == nil {
+			return ExecuteDoneMsg{Err: fmt.Errorf("no project initialized")}
 		}
+
+		// Ensure spec is set
+		if a.spec != nil {
+			proj.SetSpec(a.spec)
+		}
+
+		// Start the job
+		proj.StartJob()
 
 		spec, err := orchestrator.LoadSpecWithOverrides(a.agentDir, a.spec)
 		if err != nil {
+			proj.SetJobStatus(project.JobStatusFailed, err.Error())
 			return ExecuteDoneMsg{Err: err}
 		}
 
-		engine, err := orchestrator.NewEngine(spec, task, projectRoot, a.agentDir)
+		// Use project's phases directory for run output
+		runDir := filepath.Join(proj.KyoteeDir, project.PhasesDir)
+		engine, err := orchestrator.NewEngineWithRunDir(spec, task, a.repoRoot, a.agentDir, runDir)
 		if err != nil {
+			proj.SetJobStatus(project.JobStatusFailed, err.Error())
 			return ExecuteDoneMsg{Err: err}
 		}
 
@@ -482,10 +754,100 @@ func (a *App) runExecute() tea.Cmd {
 			a.execState.RunDir = engine.RunDir
 		}
 
-		// Note: In a real implementation, we'd use channels to stream updates
-		// For now, we run synchronously (the streaming would require more complex
-		// integration with the Bubble Tea message loop)
-		if err := engine.Run(); err != nil {
+		// Connect engine callbacks to update TUI and project state
+		engine.OnPhase = func(idx int, status types.PhaseStatus) {
+			phaseID := engine.State.Phases[idx].Phase.ID
+			switch status {
+			case types.PhaseRunning:
+				proj.UpdatePhase(phaseID, "running")
+				if program != nil {
+					program.Send(PhaseStartMsg{PhaseID: phaseID})
+				}
+			case types.PhasePassed:
+				proj.UpdatePhase(phaseID, "passed")
+				if program != nil {
+					program.Send(PhaseEndMsg{PhaseID: phaseID, Passed: true})
+				}
+			case types.PhaseFailed:
+				proj.UpdatePhase(phaseID, "failed")
+				if program != nil {
+					program.Send(PhaseEndMsg{PhaseID: phaseID, Passed: false})
+				}
+			}
+		}
+
+		engine.OnOutput = func(phaseID, text string) {
+			if program != nil {
+				program.Send(PhaseOutputMsg{PhaseID: phaseID, Line: text})
+			}
+		}
+
+		engine.OnNarrate = func(text string) {
+			if program != nil {
+				program.Send(NarrationMsg{Text: text})
+			}
+		}
+
+		// Run with context for pause support
+		if err := engine.RunWithContext(ctx); err != nil {
+			// Check if this was a pause (not a real error)
+			if errors.Is(err, orchestrator.ErrPaused) {
+				proj.SetJobStatus(project.JobStatusPaused, "")
+				return ExecuteDoneMsg{Err: nil} // Not an error, just paused
+			}
+			proj.SetJobStatus(project.JobStatusFailed, err.Error())
+			return ExecuteDoneMsg{Err: err}
+		}
+
+		proj.SetJobStatus(project.JobStatusCompleted, "")
+		return ExecuteDoneMsg{}
+	}
+}
+
+func (a *App) runAutonomous() tea.Cmd {
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancelExec = cancel
+
+	program := a.program
+
+	return func() tea.Msg {
+		// Build task from spec
+		task := a.buildTaskFromSpec()
+
+		// Get skill content if available
+		skillContent := ""
+		if a.discovery != nil && a.discovery.ActiveSkill != nil {
+			skillContent = a.discovery.ActiveSkill.ToPromptContext()
+		}
+
+		// Create autonomous engine
+		engine := orchestrator.NewAutonomousEngine(a.spec, task, a.repoRoot, a.agentDir)
+		engine.SkillContent = skillContent
+
+		// Connect callbacks
+		engine.OnOutput = func(text string) {
+			if program != nil {
+				program.Send(AutonomousOutput{Text: text})
+			}
+		}
+
+		engine.OnPhase = func(phase, status string) {
+			if program != nil {
+				program.Send(AutonomousOutput{Text: fmt.Sprintf("\n[%s] %s\n", phase, status)})
+			}
+		}
+
+		engine.OnTool = func(name string, input any) {
+			if program != nil {
+				program.Send(AutonomousToolMsg{Name: name, Input: input})
+			}
+		}
+
+		// Run autonomously
+		if err := engine.Run(ctx); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return ExecuteDoneMsg{Err: nil} // User cancelled
+			}
 			return ExecuteDoneMsg{Err: err}
 		}
 
@@ -511,6 +873,145 @@ func (a *App) buildTaskFromSpec() string {
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+func (a *App) getProjectNameFromSpec() string {
+	if a.spec == nil {
+		return "my-project"
+	}
+
+	// Try to get project name from spec
+	if name, ok := a.spec["project_name"].(string); ok && name != "" {
+		return sanitizeFolderName(name)
+	}
+	if name, ok := a.spec["name"].(string); ok && name != "" {
+		return sanitizeFolderName(name)
+	}
+	// Try to derive from goal
+	if goal, ok := a.spec["goal"].(string); ok && goal != "" {
+		// Take first few words and convert to kebab-case
+		words := strings.Fields(goal)
+		if len(words) > 3 {
+			words = words[:3]
+		}
+		name := strings.ToLower(strings.Join(words, "-"))
+		return sanitizeFolderName(name)
+	}
+
+	return "my-project"
+}
+
+func sanitizeFolderName(name string) string {
+	// Convert to lowercase, replace spaces with hyphens, remove special chars
+	name = strings.ToLower(name)
+	name = strings.ReplaceAll(name, " ", "-")
+	// Keep only alphanumeric and hyphens
+	var result strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			result.WriteRune(r)
+		}
+	}
+	// Trim leading/trailing hyphens
+	return strings.Trim(result.String(), "-")
+}
+
+func setupProjectFolder(a *App, newPath string) error {
+	// Create new folder
+	if err := os.MkdirAll(newPath, 0755); err != nil {
+		return fmt.Errorf("create folder: %w", err)
+	}
+
+	// Move .kyotee from current location to new folder
+	oldKyotee := filepath.Join(a.repoRoot, ".kyotee")
+	newKyotee := filepath.Join(newPath, ".kyotee")
+
+	if _, err := os.Stat(oldKyotee); err == nil {
+		// .kyotee exists, move it
+		if err := os.Rename(oldKyotee, newKyotee); err != nil {
+			// If rename fails (cross-device), try copy
+			if err := copyDir(oldKyotee, newKyotee); err != nil {
+				return fmt.Errorf("move .kyotee: %w", err)
+			}
+			os.RemoveAll(oldKyotee)
+		}
+	}
+
+	// Update project reference
+	if a.proj != nil {
+		newProj, err := project.Open(newPath)
+		if err == nil {
+			// Copy spec to new project
+			newProj.SetSpec(a.spec)
+			a.proj = newProj
+		}
+	}
+
+	// Create CLAUDE.md
+	createClaudeMD(newPath)
+
+	return nil
+}
+
+func createClaudeMD(projectPath string) {
+	claudeMD := `# Kyotee Project
+
+This project was scaffolded by [Kyotee](https://github.com/stukennedy/kyotee), an autonomous development agent.
+
+## Project Resources
+
+The ` + "`.kyotee/`" + ` folder contains:
+
+- **` + "`spec.json`" + `** - The approved specification that defines what this project should do
+- **` + "`conversation.json`" + `** - Discovery conversation history (for context/resume)
+
+## For Claude Code
+
+When working on this project, you can reference the spec for requirements:
+
+` + "```bash" + `
+cat .kyotee/spec.json
+` + "```" + `
+
+The spec is the source of truth for:
+- Project purpose and features
+- Tech stack decisions
+- Architecture choices made during discovery
+
+## Resuming Work
+
+If the project is incomplete, you can resume with:
+
+` + "```bash" + `
+kyotee --continue
+` + "```" + `
+
+This will pick up where the last session left off.
+`
+
+	claudePath := filepath.Join(projectPath, "CLAUDE.md")
+	os.WriteFile(claudePath, []byte(claudeMD), 0644)
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, _ := filepath.Rel(src, path)
+		dstPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dstPath, data, info.Mode())
+	})
 }
 
 func (a *App) updateLayout() {
@@ -613,11 +1114,17 @@ func (a App) View() string {
 func (a App) viewDiscovery() string {
 	var b strings.Builder
 
+	// Show "Resumed" indicator if we loaded existing state
+	modeText := "Discovery"
+	if a.proj != nil && a.proj.HasConversation() && len(a.messages) > 1 {
+		modeText = "Discovery " + PhasePassedStyle.Render("(resumed)")
+	}
+
 	header := HeaderStyle.Width(a.width).Render(
 		lipgloss.JoinHorizontal(lipgloss.Left,
 			Logo(),
 			"  ",
-			TitleStyle.Render("Discovery"),
+			TitleStyle.Render(modeText),
 		),
 	)
 	b.WriteString(header)
@@ -637,7 +1144,7 @@ func (a App) viewDiscovery() string {
 	b.WriteString(inputBox)
 	b.WriteString("\n")
 
-	help := "Enter: send • Cmd/Alt+Enter: newline • Esc: quit"
+	help := "Enter: send • Ctrl+J: newline • PgUp/PgDn: scroll • Esc: quit"
 	if a.specReady {
 		help = "Type 'yes' to start building • " + help
 	}
@@ -655,23 +1162,23 @@ func (a App) renderSpec() string {
 	lines = append(lines, SpecTitleStyle.Render("📋 READY TO BUILD"))
 
 	if goal, ok := a.spec["goal"].(string); ok {
-		lines = append(lines, fmt.Sprintf("  %s", goal))
+		lines = append(lines, fmt.Sprintf("  %s", PhasePassedStyle.Render(goal)))
 	}
 	if projectName, ok := a.spec["project_name"].(string); ok && projectName != "" && projectName != "." {
-		lines = append(lines, fmt.Sprintf("  Project: %s/", projectName))
+		lines = append(lines, fmt.Sprintf("  %s %s", HelpStyle.Render("Project:"), TitleStyle.Render(projectName+"/")))
 	}
 	if lang, ok := a.spec["language"].(string); ok {
-		lines = append(lines, fmt.Sprintf("  Language: %s", lang))
+		lines = append(lines, fmt.Sprintf("  %s %s", HelpStyle.Render("Language:"), TitleStyle.Render(lang)))
+	}
+	if framework, ok := a.spec["framework"].(string); ok && framework != "" {
+		lines = append(lines, fmt.Sprintf("  %s %s", HelpStyle.Render("Framework:"), TitleStyle.Render(framework)))
 	}
 	if features, ok := a.spec["features"].([]any); ok && len(features) > 0 {
-		featStrs := make([]string, 0, len(features))
+		lines = append(lines, fmt.Sprintf("  %s", HelpStyle.Render("Features:")))
 		for _, f := range features {
 			if fs, ok := f.(string); ok {
-				featStrs = append(featStrs, fs)
+				lines = append(lines, fmt.Sprintf("    %s %s", PhasePassedStyle.Render("•"), fs))
 			}
-		}
-		if len(featStrs) > 0 {
-			lines = append(lines, fmt.Sprintf("  Features: %s", strings.Join(featStrs, ", ")))
 		}
 	}
 
@@ -679,9 +1186,50 @@ func (a App) renderSpec() string {
 }
 
 func (a App) viewExecute() string {
+	// Autonomous mode uses different rendering
+	if a.autonomous {
+		return a.viewAutonomous()
+	}
+
 	if a.execState == nil {
 		return "Initializing..."
 	}
 
 	return RenderExecuteView(a.execState, a.width, a.selectedIdx, a.spinner.View())
+}
+
+func (a App) viewAutonomous() string {
+	var b strings.Builder
+
+	// Header
+	header := HeaderStyle.Width(a.width).Render(
+		lipgloss.JoinHorizontal(lipgloss.Left,
+			Logo(),
+			"  ",
+			TitleStyle.Render("Autonomous Execution"),
+			"  ",
+			a.spinner.View(),
+		),
+	)
+	b.WriteString(header)
+	b.WriteString("\n\n")
+
+	// Output viewport
+	content := strings.Join(a.autonomousOutput, "")
+	if content == "" {
+		content = "Starting..."
+	}
+
+	wrapped := wordwrap.String(content, a.width-4)
+	a.execVP.SetContent(wrapped)
+
+	outputBox := ChatBoxStyle.Width(a.width - 2).Height(a.height - 8).Render(a.execVP.View())
+	b.WriteString(outputBox)
+	b.WriteString("\n")
+
+	// Help
+	help := HelpStyle.Render("Esc: cancel • PgUp/PgDn: scroll")
+	b.WriteString(help)
+
+	return b.String()
 }
