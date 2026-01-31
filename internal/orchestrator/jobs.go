@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/stukennedy/kyotee/internal/types"
 )
 
 // JobState represents a persisted job state
@@ -28,11 +30,16 @@ type JobState struct {
 // JobPhaseState represents the state of a single phase
 type JobPhaseState struct {
 	ID        string    `json:"id"`
-	Status    string    `json:"status"` // pending, running, passed, failed
+	Status    string    `json:"status"` // pending, running, passed, failed, checkpoint
 	Iteration int       `json:"iteration"`
 	StartTime time.Time `json:"start_time,omitempty"`
 	EndTime   time.Time `json:"end_time,omitempty"`
 	Output    []string  `json:"output,omitempty"`
+	// Checkpoint state for mid-build pauses
+	ChunkIndex            int               `json:"chunk_index,omitempty"`
+	TotalChunks           int               `json:"total_chunks,omitempty"`
+	Checkpoint            *types.Checkpoint  `json:"checkpoint,omitempty"`
+	CheckpointResolutions []string           `json:"checkpoint_resolutions,omitempty"`
 }
 
 // JobSummary is a lightweight job listing
@@ -137,6 +144,35 @@ func ListJobs(agentDir string) ([]JobSummary, error) {
 	})
 
 	return jobs, nil
+}
+
+// ResolveCheckpoint resolves a checkpoint on a job, allowing it to continue
+func ResolveCheckpoint(agentDir, jobID, resolution string) error {
+	state, err := LoadJobState(agentDir, jobID)
+	if err != nil {
+		return err
+	}
+	if state.Status != "checkpoint" {
+		return fmt.Errorf("job %s is not at a checkpoint (status: %s)", jobID, state.Status)
+	}
+
+	// Find the phase with the checkpoint
+	for i := range state.Phases {
+		if state.Phases[i].Checkpoint != nil && state.Phases[i].Checkpoint.Resolution == "" {
+			state.Phases[i].Checkpoint.Resolution = resolution
+			state.Phases[i].Checkpoint.ResolvedAt = time.Now().Format(time.RFC3339)
+			state.Phases[i].CheckpointResolutions = append(
+				state.Phases[i].CheckpointResolutions,
+				fmt.Sprintf("[%s] %s → %s", state.Phases[i].Checkpoint.Type, state.Phases[i].Checkpoint.Message, resolution),
+			)
+			state.Phases[i].Status = "running"
+			state.Phases[i].Checkpoint = nil
+			break
+		}
+	}
+
+	state.Status = "running"
+	return SaveJobState(agentDir, state)
 }
 
 // DeleteJob removes a job and its artifacts

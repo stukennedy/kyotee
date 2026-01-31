@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/stukennedy/kyotee/internal/config"
 	"github.com/stukennedy/kyotee/internal/embedded"
@@ -13,6 +12,8 @@ import (
 	"github.com/stukennedy/kyotee/internal/paths"
 	"github.com/stukennedy/kyotee/internal/tui"
 	"github.com/stukennedy/kyotee/internal/types"
+
+	"golang.org/x/term"
 )
 
 var (
@@ -21,7 +22,6 @@ var (
 )
 
 func main() {
-	// Resolve paths early
 	var err error
 	appPaths, err = paths.Resolve()
 	if err != nil {
@@ -47,7 +47,6 @@ Commands:
 		RunE:              runDiscovery,
 	}
 
-	// Run command - direct task execution
 	runCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run a task directly (skip discovery)",
@@ -56,15 +55,12 @@ Commands:
 	runCmd.Flags().StringVarP(&task, "task", "t", "", "Task description")
 	runCmd.MarkFlagRequired("task")
 
-	// Jobs command - list jobs
 	jobsCmd := &cobra.Command{
 		Use:   "jobs",
 		Short: "List all jobs",
-		Long:  "Show all previous jobs with their status. Use 'kyotee resume <id>' to continue a paused job.",
 		RunE:  listJobs,
 	}
 
-	// Resume command - resume a job
 	resumeCmd := &cobra.Command{
 		Use:   "resume <job-id>",
 		Short: "Resume a paused or failed job",
@@ -72,11 +68,9 @@ Commands:
 		RunE:  resumeJob,
 	}
 
-	// Init command - initialize project-local .kyotee
 	initCmd := &cobra.Command{
 		Use:   "init",
 		Short: "Initialize .kyotee in current project",
-		Long:  "Creates a .kyotee directory in the current project for project-specific configuration.",
 		RunE:  initProject,
 	}
 
@@ -88,14 +82,10 @@ Commands:
 	}
 }
 
-// ensureInitialized runs before any command to set up ~/.kyotee if needed
 func ensureInitialized(cmd *cobra.Command, args []string) error {
-	// Create directory structure
 	if err := appPaths.EnsureUserDir(); err != nil {
 		return err
 	}
-
-	// Install defaults on first run
 	if !appPaths.IsInitialized() {
 		fmt.Println("🐺 First run - setting up ~/.kyotee...")
 		if err := embedded.Install(appPaths.UserDir); err != nil {
@@ -104,41 +94,36 @@ func ensureInitialized(cmd *cobra.Command, args []string) error {
 		fmt.Println("✓ Ready!")
 		fmt.Println()
 	}
-
 	return nil
 }
 
-// runDiscovery starts the interactive discovery mode
 func runDiscovery(cmd *cobra.Command, args []string) error {
-	// Use NewAppForProject to enable state persistence
-	app := tui.NewAppForProject(appPaths.UserDir, appPaths.WorkDir)
-	p := tea.NewProgram(&app, tea.WithAltScreen())
-	app.SetProgram(p)
+	// Set terminal to raw mode for Tooey
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to set raw mode: %v", err)
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	if _, err := p.Run(); err != nil {
+	app := tui.NewAppForProject(appPaths.UserDir, appPaths.WorkDir)
+	if err := app.Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}
-
 	return nil
 }
 
-// runTask runs a task directly without discovery
 func runTask(cmd *cobra.Command, args []string) error {
 	specPath := appPaths.EffectiveSpecPath()
-
-	// Load spec
 	spec, err := config.LoadSpec(specPath)
 	if err != nil {
 		return err
 	}
 
-	// Create engine
 	engine, err := orchestrator.NewEngine(spec, task, appPaths.WorkDir, appPaths.UserDir)
 	if err != nil {
 		return err
 	}
 
-	// Simple console output
 	engine.OnOutput = func(phase, text string) {
 		fmt.Printf("[%s] %s", phase, text)
 	}
@@ -160,7 +145,6 @@ func runTask(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// listJobs shows all previous jobs
 func listJobs(cmd *cobra.Command, args []string) error {
 	jobs, err := orchestrator.ListJobs(appPaths.UserDir)
 	if err != nil {
@@ -176,7 +160,6 @@ func listJobs(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	for _, job := range jobs {
-		// Status icon
 		icon := "○"
 		switch job.Status {
 		case "completed":
@@ -189,10 +172,7 @@ func listJobs(cmd *cobra.Command, args []string) error {
 			icon = "●"
 		}
 
-		// Format time
 		timeStr := job.StartTime.Format("Jan 02 15:04")
-
-		// Project name
 		project := job.ProjectName
 		if project == "" || project == "." {
 			project = "(current dir)"
@@ -208,11 +188,9 @@ func listJobs(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// resumeJob resumes a paused or failed job
 func resumeJob(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
 
-	// Load job state
 	jobState, err := orchestrator.LoadJobState(appPaths.UserDir, jobID)
 	if err != nil {
 		return fmt.Errorf("failed to load job %s: %w", jobID, err)
@@ -227,25 +205,25 @@ func resumeJob(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Project: %s\n", jobState.ProjectName)
 	fmt.Printf("Task: %s\n\n", jobState.Task)
 
-	// Start TUI with the loaded job state
-	app := tui.NewAppWithJob(appPaths.UserDir, jobState.RepoRoot, jobState)
-	p := tea.NewProgram(app, tea.WithAltScreen())
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to set raw mode: %v", err)
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	if _, err := p.Run(); err != nil {
+	app := tui.NewAppWithJob(appPaths.UserDir, jobState.RepoRoot, jobState)
+	if err := app.Run(); err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}
-
 	return nil
 }
 
-// initProject creates a .kyotee directory in the current project
 func initProject(cmd *cobra.Command, args []string) error {
 	if appPaths.HasProjectConfig() {
 		fmt.Println(".kyotee already exists in this directory")
 		return nil
 	}
 
-	// Create project directory structure
 	dirs := []string{
 		appPaths.ProjectDir,
 		appPaths.ProjectSkills,
@@ -257,7 +235,6 @@ func initProject(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create a basic spec.toml
 	specContent := `# Project-specific kyotee configuration
 # Uncomment and customize as needed
 
@@ -278,7 +255,6 @@ func initProject(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to write spec.toml: %w", err)
 	}
 
-	// Create .gitignore for the .kyotee directory
 	gitignore := `# Ignore run artifacts
 runs/
 `

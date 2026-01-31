@@ -9,12 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/reflow/wordwrap"
+	"github.com/stukennedy/tooey/app"
+	"github.com/stukennedy/tooey/component"
+	"github.com/stukennedy/tooey/input"
+	"github.com/stukennedy/tooey/node"
+
 	"github.com/stukennedy/kyotee/internal/orchestrator"
 	"github.com/stukennedy/kyotee/internal/project"
 	"github.com/stukennedy/kyotee/internal/types"
@@ -26,67 +25,68 @@ type AppMode int
 const (
 	ModeDiscovery AppMode = iota
 	ModeExecute
-	ModeHistory
 )
 
-// Messages for TUI updates
+// Spinner frames
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// --- Message types ---
+
 type (
-	ResponseMsg struct {
-		Content string
-		Err     error
-	}
-	ExecuteStartMsg   struct{}
-	ExecuteDoneMsg    struct{ Err error }
-	PhaseStartMsg     struct{ PhaseID string }
-	PhaseEndMsg       struct{ PhaseID string; Passed bool }
-	PhaseOutputMsg    struct{ PhaseID string; Line string }
-	FileChangeMsg     struct{ PhaseID string; Path string; Action string }
-	GateStartMsg      struct{ PhaseID string; GateName string }
-	GateEndMsg        struct{ PhaseID string; GateName string; Passed bool }
-	NarrationMsg      struct{ Text string }
-	PauseMsg          struct{}
-	ResumeMsg         struct{}
-	AutonomousOutput  struct{ Text string }
-	AutonomousToolMsg struct{ Name string; Input any }
-	FolderSelectedMsg struct{ Path string; IsNew bool }
+	ResponseMsg          struct{ Content string; Err error }
+	ExecuteStartMsg      struct{}
+	ExecuteDoneMsg       struct{ Err error }
+	PhaseStartMsg        struct{ PhaseID string }
+	PhaseEndMsg          struct{ PhaseID string; Passed bool }
+	PhaseOutputMsg       struct{ PhaseID string; Line string }
+	FileChangeMsg        struct{ PhaseID string; Path string; Action string }
+	GateStartMsg         struct{ PhaseID string; GateName string }
+	GateEndMsg           struct{ PhaseID string; GateName string; Passed bool }
+	NarrationMsg         struct{ Text string }
+	PauseMsg             struct{}
+	ResumeMsg            struct{}
+	CheckpointMsg        struct{ Checkpoint types.Checkpoint }
+	CheckpointResolveMsg struct{ Resolution string }
+	AutonomousOutput     struct{ Text string }
+	AutonomousToolMsg    struct{ Name string; Input any }
+	FolderSelectedMsg    struct{ Path string; IsNew bool }
+	TickMsg              struct{}
 )
 
-// App is the main TUI application
-type App struct {
+// Model is the TUI application state
+type Model struct {
 	mode      AppMode
 	discovery *orchestrator.Discovery
 	agentDir  string
 	repoRoot  string
+	width     int
+	height    int
 
 	// Discovery mode
 	messages     []chatMessage
-	input        textarea.Model
-	chatVP       viewport.Model
+	input        component.TextInput
 	spec         map[string]any
 	specReady    bool
-	askingFolder bool     // Asking user about project folder location
-	projectName  string   // Derived from spec for folder name suggestion
+	askingFolder bool
+	projectName  string
 	waiting      bool
+	scrollOffset int
 
 	// Execute mode
 	execState   *ExecuteState
 	selectedIdx int
-	execVP      viewport.Model
-	spinner     spinner.Model
-	cancelExec  func() // Function to cancel execution
-	autonomous  bool   // Use autonomous execution with direct API calls
+	cancelExec  func()
+	autonomous  bool
 
-	// Autonomous mode output
+	// Autonomous mode
 	autonomousOutput []string
+	autoScrollOffset int
 
 	// State persistence
-	proj    *project.Project // Project state in .kyotee/
-	program *tea.Program
+	proj *project.Project
 
-	// Shared
-	width  int
-	height int
-	ready  bool
+	// Animation
+	spinnerIdx int
 }
 
 type chatMessage struct {
@@ -95,94 +95,52 @@ type chatMessage struct {
 }
 
 // NewApp creates a new application in discovery mode
-func NewApp(agentDir, repoRoot string) App {
-	ti := textarea.New()
-	ti.Placeholder = "What would you like to build?"
-	ti.Focus()
-	ti.CharLimit = 2000
-	ti.SetHeight(3)
-	ti.ShowLineNumbers = false
-
-	s := spinner.New()
-	s.Spinner = spinner.Dot
-	s.Style = SpinnerStyle
-
+func NewApp(agentDir, repoRoot string) *Model {
 	discovery := orchestrator.NewDiscovery(agentDir, repoRoot)
-
-	messages := []chatMessage{
-		{role: "assistant", content: "Hey! I'm Kyotee. What would you like to build today?\n\nTell me about your project and I'll help figure out the details."},
-	}
-
-	return App{
+	return &Model{
 		mode:      ModeDiscovery,
 		discovery: discovery,
 		agentDir:  agentDir,
 		repoRoot:  repoRoot,
-		messages:  messages,
-		input:     ti,
-		spinner:   s,
+		input:     component.NewTextInput("What would you like to build?"),
+		messages: []chatMessage{
+			{role: "assistant", content: "Hey! I'm Kyotee. What would you like to build today?\n\nTell me about your project and I'll help figure out the details."},
+		},
 	}
 }
 
-// NewAppForProject creates an application with state persistence in local .kyotee/
-// - Opens or creates .kyotee/ in current directory
-// - Loads existing conversation and spec
-// - Auto-resumes most recent unfinished job
-func NewAppForProject(agentDir, repoRoot string) App {
-	ti := textarea.New()
-	ti.Placeholder = "What would you like to build?"
-	ti.Focus()
-	ti.CharLimit = 2000
-	ti.SetHeight(3)
-	ti.ShowLineNumbers = false
-
-	s := spinner.New()
-	s.Spinner = spinner.Dot
-	s.Style = SpinnerStyle
-
+// NewAppForProject creates an application with state persistence
+func NewAppForProject(agentDir, repoRoot string) *Model {
 	discovery := orchestrator.NewDiscovery(agentDir, repoRoot)
 
-	// Open or create .kyotee/ in current directory
 	proj, err := project.Open(repoRoot)
 	if err != nil {
-		// Fall back to basic app without persistence
-		return App{
+		return &Model{
 			mode:      ModeDiscovery,
 			discovery: discovery,
 			agentDir:  agentDir,
 			repoRoot:  repoRoot,
+			input:     component.NewTextInput("What would you like to build?"),
 			messages: []chatMessage{
 				{role: "assistant", content: "Hey! I'm Kyotee. What would you like to build today?\n\nTell me about your project and I'll help figure out the details."},
 			},
-			input:   ti,
-			spinner: s,
 		}
 	}
 
-	// Load existing messages from project
 	messages := []chatMessage{
 		{role: "assistant", content: "Hey! I'm Kyotee. What would you like to build today?\n\nTell me about your project and I'll help figure out the details."},
 	}
 
 	if proj.HasConversation() {
 		messages = []chatMessage{}
-		// Also load into discovery's history so Claude has context
 		discoveryHistory := []orchestrator.DiscoveryMessage{}
 		for _, m := range proj.Conversation.Messages {
-			messages = append(messages, chatMessage{
-				role:    m.Role,
-				content: m.Content,
-			})
-			discoveryHistory = append(discoveryHistory, orchestrator.DiscoveryMessage{
-				Role:    m.Role,
-				Content: m.Content,
-			})
+			messages = append(messages, chatMessage{role: m.Role, content: m.Content})
+			discoveryHistory = append(discoveryHistory, orchestrator.DiscoveryMessage{Role: m.Role, Content: m.Content})
 		}
-		// Sync to discovery so Claude has the conversation context
 		discovery.LoadHistory(discoveryHistory)
 	}
 
-	// Load existing spec
 	var spec map[string]any
 	specReady := false
 	if proj.HasSpec() {
@@ -190,51 +148,40 @@ func NewAppForProject(agentDir, repoRoot string) App {
 		specReady = true
 	}
 
-	app := App{
+	mdl := &Model{
 		mode:      ModeDiscovery,
 		discovery: discovery,
 		agentDir:  agentDir,
 		repoRoot:  repoRoot,
+		input:     component.NewTextInput("What would you like to build?"),
 		messages:  messages,
-		input:     ti,
-		spinner:   s,
 		proj:      proj,
 		spec:      spec,
 		specReady: specReady,
 	}
 
-	// Auto-resume if there's an unfinished job
+	// Auto-resume unfinished job
 	if proj.CanResume() {
-		app.mode = ModeExecute
-		app.execState = &ExecuteState{
+		mdl.mode = ModeExecute
+		mdl.execState = &ExecuteState{
 			ProjectName: proj.Spec.ProjectName,
 			Task:        proj.Spec.Goal,
 			StartTime:   proj.Job.StartedAt,
 			Paused:      proj.Job.Status == project.JobStatusPaused,
 		}
 		for _, p := range proj.Job.Phases {
-			app.execState.Phases = append(app.execState.Phases, PhaseProgress{
+			mdl.execState.Phases = append(mdl.execState.Phases, PhaseProgress{
 				ID:     p.ID,
 				Status: p.Status,
 			})
 		}
 	}
 
-	return app
-}
-
-// SetProgram sets the tea.Program reference for sending messages
-func (a *App) SetProgram(p *tea.Program) {
-	a.program = p
+	return mdl
 }
 
 // NewAppWithJob creates an application to resume an existing job
-func NewAppWithJob(agentDir, repoRoot string, jobState *orchestrator.JobState) App {
-	s := spinner.New()
-	s.Spinner = spinner.Dot
-	s.Style = SpinnerStyle
-
-	// Convert job state to execute state
+func NewAppWithJob(agentDir, repoRoot string, jobState *orchestrator.JobState) *Model {
 	execState := &ExecuteState{
 		ProjectName: jobState.ProjectName,
 		Task:        jobState.Task,
@@ -242,8 +189,6 @@ func NewAppWithJob(agentDir, repoRoot string, jobState *orchestrator.JobState) A
 		RunDir:      filepath.Join(agentDir, "runs", jobState.ID),
 		Paused:      jobState.Status == "paused",
 	}
-
-	// Convert phases
 	for _, jp := range jobState.Phases {
 		execState.Phases = append(execState.Phases, PhaseProgress{
 			ID:        jp.ID,
@@ -256,185 +201,178 @@ func NewAppWithJob(agentDir, repoRoot string, jobState *orchestrator.JobState) A
 	}
 	execState.CurrentIdx = jobState.CurrentPhase
 
-	return App{
+	return &Model{
 		mode:      ModeExecute,
 		agentDir:  agentDir,
 		repoRoot:  repoRoot,
 		spec:      jobState.Spec,
 		execState: execState,
-		spinner:   s,
 	}
 }
 
-func (a App) Init() tea.Cmd {
-	return tea.Batch(
-		textarea.Blink,
-		a.spinner.Tick,
-	)
+// Run starts the TUI application
+func (m *Model) Run() error {
+	mdl := m
+	a := &app.App{
+		Init: func() interface{} {
+			w, h := input.TermSize()
+			mdl.width = w
+			mdl.height = h
+			return mdl
+		},
+		Update: tuiUpdate,
+		View:   tuiView,
+	}
+	return a.Run(context.Background())
 }
 
-func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
+// --- Update ---
+
+func tuiUpdate(m interface{}, msg app.Msg) app.UpdateResult {
+	mdl := m.(*Model)
 
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		return a.handleKey(msg)
+	case app.ResizeMsg:
+		mdl.width, mdl.height = msg.Width, msg.Height
 
-	case tea.WindowSizeMsg:
-		a.width = msg.Width
-		a.height = msg.Height
-		a.updateLayout()
-
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		a.spinner, cmd = a.spinner.Update(msg)
-		cmds = append(cmds, cmd)
-
-	// Discovery messages
-	case ResponseMsg:
-		a.waiting = false
-		var content string
-		if msg.Err != nil {
-			content = fmt.Sprintf("Error: %v", msg.Err)
+	case app.ScrollMsg:
+		if mdl.mode == ModeDiscovery {
+			mdl.scrollOffset += msg.Delta
+			if mdl.scrollOffset < 0 {
+				mdl.scrollOffset = 0
+			}
 		} else {
-			content = msg.Content
-		}
-		a.messages = append(a.messages, chatMessage{
-			role:    "assistant",
-			content: content,
-		})
-		// Save to project
-		if a.proj != nil {
-			a.proj.AddMessage("assistant", content)
-		}
-		a.updateChatViewport()
-
-		if a.discovery.IsSpecReady() {
-			a.spec = a.discovery.GetSpec()
-			a.specReady = true
-			// Save spec to project
-			if a.proj != nil {
-				a.proj.SetSpec(a.spec)
+			mdl.autoScrollOffset += msg.Delta
+			if mdl.autoScrollOffset < 0 {
+				mdl.autoScrollOffset = 0
 			}
 		}
+
+	case app.KeyMsg:
+		return handleKey(mdl, msg)
+
+	case TickMsg:
+		mdl.spinnerIdx = (mdl.spinnerIdx + 1) % len(spinnerFrames)
+		return app.WithCmd(mdl, tickCmd())
+
+	// Discovery responses
+	case ResponseMsg:
+		mdl.waiting = false
+		content := msg.Content
+		if msg.Err != nil {
+			content = fmt.Sprintf("Error: %v", msg.Err)
+		}
+		mdl.messages = append(mdl.messages, chatMessage{role: "assistant", content: content})
+		if mdl.proj != nil {
+			mdl.proj.AddMessage("assistant", content)
+		}
+		if mdl.discovery.IsSpecReady() {
+			mdl.spec = mdl.discovery.GetSpec()
+			mdl.specReady = true
+			if mdl.proj != nil {
+				mdl.proj.SetSpec(mdl.spec)
+			}
+		}
+		mdl.scrollOffset = 0
 
 	// Folder selection
 	case FolderSelectedMsg:
-		a.askingFolder = false
+		mdl.askingFolder = false
 		if msg.IsNew {
-			// Create new folder and move .kyotee there
-			if err := setupProjectFolder(&a, msg.Path); err != nil {
-				a.messages = append(a.messages, chatMessage{
-					role:    "assistant",
-					content: fmt.Sprintf("Error creating folder: %v", err),
+			if err := setupProjectFolder(mdl, msg.Path); err != nil {
+				mdl.messages = append(mdl.messages, chatMessage{
+					role: "assistant", content: fmt.Sprintf("Error creating folder: %v", err),
 				})
-				a.updateChatViewport()
-				return a, nil
+				return app.NoCmd(mdl)
 			}
-			a.repoRoot = msg.Path
-			a.messages = append(a.messages, chatMessage{
-				role:    "assistant",
-				content: fmt.Sprintf("Created %s/\nStarting build...", a.projectName),
+			mdl.repoRoot = msg.Path
+			mdl.messages = append(mdl.messages, chatMessage{
+				role: "assistant", content: fmt.Sprintf("Created %s/\nStarting build...", mdl.projectName),
 			})
 		} else {
-			// Use current folder, just create CLAUDE.md
 			createClaudeMD(msg.Path)
-			a.messages = append(a.messages, chatMessage{
-				role:    "assistant",
-				content: "Starting build in current folder...",
+			mdl.messages = append(mdl.messages, chatMessage{
+				role: "assistant", content: "Starting build in current folder...",
 			})
 		}
-		a.updateChatViewport()
-		return a, func() tea.Msg { return ExecuteStartMsg{} }
+		return app.WithCmd(mdl, func() app.Msg { return ExecuteStartMsg{} })
 
 	// Execute messages
 	case ExecuteStartMsg:
-		a.mode = ModeExecute
-		a.autonomous = true // Always use autonomous mode after discovery
-		if a.autonomous {
-			a.autonomousOutput = []string{"🚀 Starting autonomous execution...\n\n"}
-			cmds = append(cmds, a.spinner.Tick, a.runAutonomous())
-		} else {
-			a.initExecuteState()
-			cmds = append(cmds, a.runExecute())
-		}
+		mdl.mode = ModeExecute
+		mdl.autonomous = true
+		mdl.autonomousOutput = []string{"🚀 Starting autonomous execution...\n\n"}
+		return app.WithCmd(mdl, mdl.runAutonomousCmd(), tickCmd())
 
 	case PhaseStartMsg:
-		if a.execState != nil {
-			for i := range a.execState.Phases {
-				if a.execState.Phases[i].ID == msg.PhaseID {
-					a.execState.Phases[i].Status = "running"
-					a.execState.Phases[i].StartTime = time.Now()
-					a.execState.CurrentIdx = i
-					// Auto-expand running phase
-					a.execState.Phases[i].Expanded = true
-					a.selectedIdx = i
+		if mdl.execState != nil {
+			for i := range mdl.execState.Phases {
+				if mdl.execState.Phases[i].ID == msg.PhaseID {
+					mdl.execState.Phases[i].Status = "running"
+					mdl.execState.Phases[i].StartTime = time.Now()
+					mdl.execState.CurrentIdx = i
+					mdl.execState.Phases[i].Expanded = true
+					mdl.selectedIdx = i
 					break
 				}
 			}
 		}
 
 	case PhaseEndMsg:
-		if a.execState != nil {
-			for i := range a.execState.Phases {
-				if a.execState.Phases[i].ID == msg.PhaseID {
+		if mdl.execState != nil {
+			for i := range mdl.execState.Phases {
+				if mdl.execState.Phases[i].ID == msg.PhaseID {
 					if msg.Passed {
-						a.execState.Phases[i].Status = "passed"
+						mdl.execState.Phases[i].Status = "passed"
 					} else {
-						a.execState.Phases[i].Status = "failed"
+						mdl.execState.Phases[i].Status = "failed"
 					}
-					a.execState.Phases[i].EndTime = time.Now()
+					mdl.execState.Phases[i].EndTime = time.Now()
 					break
 				}
 			}
 		}
 
 	case PhaseOutputMsg:
-		if a.execState != nil {
-			for i := range a.execState.Phases {
-				if a.execState.Phases[i].ID == msg.PhaseID {
-					a.execState.Phases[i].Output = append(a.execState.Phases[i].Output, msg.Line)
+		if mdl.execState != nil {
+			for i := range mdl.execState.Phases {
+				if mdl.execState.Phases[i].ID == msg.PhaseID {
+					mdl.execState.Phases[i].Output = append(mdl.execState.Phases[i].Output, msg.Line)
 					break
 				}
 			}
 		}
 
 	case FileChangeMsg:
-		if a.execState != nil {
-			for i := range a.execState.Phases {
-				if a.execState.Phases[i].ID == msg.PhaseID {
-					a.execState.Phases[i].Files = append(a.execState.Phases[i].Files, FileChange{
-						Path:   msg.Path,
-						Action: msg.Action,
-					})
+		if mdl.execState != nil {
+			for i := range mdl.execState.Phases {
+				if mdl.execState.Phases[i].ID == msg.PhaseID {
+					mdl.execState.Phases[i].Files = append(mdl.execState.Phases[i].Files, FileChange{Path: msg.Path, Action: msg.Action})
 					break
 				}
 			}
 		}
 
 	case GateStartMsg:
-		if a.execState != nil {
-			for i := range a.execState.Phases {
-				if a.execState.Phases[i].ID == msg.PhaseID {
-					a.execState.Phases[i].Gates = append(a.execState.Phases[i].Gates, GateProgress{
-						Name:   msg.GateName,
-						Status: "running",
-					})
+		if mdl.execState != nil {
+			for i := range mdl.execState.Phases {
+				if mdl.execState.Phases[i].ID == msg.PhaseID {
+					mdl.execState.Phases[i].Gates = append(mdl.execState.Phases[i].Gates, GateProgress{Name: msg.GateName, Status: "running"})
 					break
 				}
 			}
 		}
 
 	case GateEndMsg:
-		if a.execState != nil {
-			for i := range a.execState.Phases {
-				if a.execState.Phases[i].ID == msg.PhaseID {
-					for j := range a.execState.Phases[i].Gates {
-						if a.execState.Phases[i].Gates[j].Name == msg.GateName {
+		if mdl.execState != nil {
+			for i := range mdl.execState.Phases {
+				if mdl.execState.Phases[i].ID == msg.PhaseID {
+					for j := range mdl.execState.Phases[i].Gates {
+						if mdl.execState.Phases[i].Gates[j].Name == msg.GateName {
 							if msg.Passed {
-								a.execState.Phases[i].Gates[j].Status = "passed"
+								mdl.execState.Phases[i].Gates[j].Status = "passed"
 							} else {
-								a.execState.Phases[i].Gates[j].Status = "failed"
+								mdl.execState.Phases[i].Gates[j].Status = "failed"
 							}
 							break
 						}
@@ -445,363 +383,458 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case NarrationMsg:
-		if a.execState != nil {
-			// Add narration to current phase output
-			idx := a.execState.CurrentIdx
-			if idx >= 0 && idx < len(a.execState.Phases) {
-				a.execState.Phases[idx].Output = append(
-					a.execState.Phases[idx].Output,
-					"💭 "+msg.Text,
-				)
+		if mdl.execState != nil {
+			idx := mdl.execState.CurrentIdx
+			if idx >= 0 && idx < len(mdl.execState.Phases) {
+				mdl.execState.Phases[idx].Output = append(mdl.execState.Phases[idx].Output, "💭 "+msg.Text)
 			}
 		}
 
+	case CheckpointMsg:
+		if mdl.execState != nil {
+			mdl.execState.Checkpoint = &CheckpointState{
+				Active:  true,
+				Type:    string(msg.Checkpoint.Type),
+				Message: msg.Checkpoint.Message,
+				Options: msg.Checkpoint.Options,
+			}
+			mdl.execState.Paused = true
+		}
+
+	case CheckpointResolveMsg:
+		if mdl.execState != nil {
+			mdl.execState.Checkpoint = nil
+			mdl.execState.Paused = false
+		}
+
 	case ExecuteDoneMsg:
-		if a.execState != nil {
-			a.execState.Error = msg.Err
+		if mdl.execState != nil {
+			mdl.execState.Error = msg.Err
 		}
 
 	case PauseMsg:
-		if a.execState != nil && !a.execState.Paused {
-			a.execState.Paused = true
-			if a.cancelExec != nil {
-				a.cancelExec()
+		if mdl.execState != nil && !mdl.execState.Paused {
+			mdl.execState.Paused = true
+			if mdl.cancelExec != nil {
+				mdl.cancelExec()
 			}
 		}
 
 	case ResumeMsg:
-		if a.execState != nil && a.execState.Paused {
-			a.execState.Paused = false
-			cmds = append(cmds, a.runExecute())
+		if mdl.execState != nil && mdl.execState.Paused {
+			mdl.execState.Paused = false
+			return app.WithCmd(mdl, mdl.runExecuteCmd())
 		}
 
 	case AutonomousOutput:
-		a.autonomousOutput = append(a.autonomousOutput, msg.Text)
-		// Auto-scroll to bottom
-		if a.ready {
-			content := strings.Join(a.autonomousOutput, "")
-			wrapped := wordwrap.String(content, a.execVP.Width-2)
-			a.execVP.SetContent(wrapped)
-			a.execVP.GotoBottom()
-		}
+		mdl.autonomousOutput = append(mdl.autonomousOutput, msg.Text)
+		mdl.autoScrollOffset = 0 // auto-scroll to bottom
 
 	case AutonomousToolMsg:
-		// Log tool call to output
-		a.autonomousOutput = append(a.autonomousOutput, fmt.Sprintf("🔧 %s\n", msg.Name))
+		mdl.autonomousOutput = append(mdl.autonomousOutput, fmt.Sprintf("🔧 %s\n", msg.Name))
 	}
 
-	// Update textarea when in discovery mode
-	if a.mode == ModeDiscovery && !a.waiting {
-		var cmd tea.Cmd
-		a.input, cmd = a.input.Update(msg)
-		cmds = append(cmds, cmd)
-	}
-
-	return a, tea.Batch(cmds...)
+	return app.NoCmd(mdl)
 }
 
-func (a *App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-
-	// Global keys
-	switch msg.Type {
-	case tea.KeyCtrlC:
-		return a, tea.Quit
-
-	case tea.KeyEsc:
-		if a.mode == ModeExecute {
-			// In autonomous mode, cancel and quit
-			if a.autonomous {
-				if a.cancelExec != nil {
-					a.cancelExec()
+func handleKey(mdl *Model, msg app.KeyMsg) app.UpdateResult {
+	switch msg.Key.Type {
+	case input.Escape:
+		if mdl.mode == ModeExecute {
+			if mdl.autonomous {
+				if mdl.cancelExec != nil {
+					mdl.cancelExec()
 				}
-				return a, tea.Quit
+				return app.UpdateResult{Model: nil} // quit
 			}
-			// In legacy execute mode, Esc pauses or quits if done
-			if a.execState != nil && (a.execState.Error != nil || a.allPhasesDone()) {
-				return a, tea.Quit
+			if mdl.execState != nil && (mdl.execState.Error != nil || allPhasesDone(mdl)) {
+				return app.UpdateResult{Model: nil}
 			}
-			// Otherwise pause
-			return a, func() tea.Msg { return PauseMsg{} }
+			return app.WithCmd(mdl, func() app.Msg { return PauseMsg{} })
 		}
-		return a, tea.Quit
+		return app.UpdateResult{Model: nil} // quit
+
+	case input.PageUp:
+		if mdl.mode == ModeDiscovery {
+			mdl.scrollOffset += 5
+		} else {
+			mdl.autoScrollOffset += 5
+		}
+		return app.NoCmd(mdl)
+
+	case input.PageDown:
+		if mdl.mode == ModeDiscovery {
+			mdl.scrollOffset -= 5
+			if mdl.scrollOffset < 0 {
+				mdl.scrollOffset = 0
+			}
+		} else {
+			mdl.autoScrollOffset -= 5
+			if mdl.autoScrollOffset < 0 {
+				mdl.autoScrollOffset = 0
+			}
+		}
+		return app.NoCmd(mdl)
 	}
 
-	// Mode-specific keys
-	switch a.mode {
-	case ModeDiscovery:
-		return a.handleDiscoveryKey(msg)
-	case ModeExecute:
-		return a.handleExecuteKey(msg)
+	if mdl.mode == ModeDiscovery {
+		return handleDiscoveryKey(mdl, msg)
 	}
-
-	return a, tea.Batch(cmds...)
+	return handleExecuteKey(mdl, msg)
 }
 
-func (a *App) handleDiscoveryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlJ:
-		// Ctrl+J inserts a newline (works in most terminals)
-		if !a.waiting {
-			a.input.InsertString("\n")
-		}
-		return a, nil
+func handleDiscoveryKey(mdl *Model, msg app.KeyMsg) app.UpdateResult {
+	switch msg.Key.Type {
+	case input.Enter:
+		inputVal := strings.TrimSpace(mdl.input.Value)
+		inputLower := strings.ToLower(inputVal)
 
-	case tea.KeyPgUp:
-		// Scroll chat viewport up
-		a.chatVP, _ = a.chatVP.Update(msg)
-		return a, nil
-
-	case tea.KeyPgDown:
-		// Scroll chat viewport down
-		a.chatVP, _ = a.chatVP.Update(msg)
-		return a, nil
-
-	case tea.KeyUp:
-		// Scroll up with arrow key when waiting (can't type)
-		if a.waiting {
-			a.chatVP, _ = a.chatVP.Update(msg)
-			return a, nil
-		}
-
-	case tea.KeyDown:
-		// Scroll down with arrow key when waiting
-		if a.waiting {
-			a.chatVP, _ = a.chatVP.Update(msg)
-			return a, nil
-		}
-
-	case tea.KeyEnter:
-		// Enter sends the message
-		input := strings.TrimSpace(strings.ToLower(a.input.Value()))
-
-		// Handle folder selection
-		if a.askingFolder {
-			a.input.Reset()
-			switch input {
+		// Folder selection
+		if mdl.askingFolder {
+			_, newInput := mdl.input.Submit()
+			mdl.input = newInput
+			switch inputLower {
 			case "1", "here", "current":
-				// Use current folder
-				return a, func() tea.Msg {
-					return FolderSelectedMsg{Path: a.repoRoot, IsNew: false}
-				}
-			case "2", "new", "child":
-				// Create new child folder
-				newPath := filepath.Join(a.repoRoot, a.projectName)
-				return a, func() tea.Msg {
-					return FolderSelectedMsg{Path: newPath, IsNew: true}
-				}
-			default:
-				// Invalid input, show options again
-				a.messages = append(a.messages, chatMessage{
-					role:    "assistant",
-					content: "Please enter 1 (current folder) or 2 (new folder):",
+				return app.WithCmd(mdl, func() app.Msg {
+					return FolderSelectedMsg{Path: mdl.repoRoot, IsNew: false}
 				})
-				a.updateChatViewport()
-				return a, nil
+			case "2", "new", "child":
+				newPath := filepath.Join(mdl.repoRoot, mdl.projectName)
+				return app.WithCmd(mdl, func() app.Msg {
+					return FolderSelectedMsg{Path: newPath, IsNew: true}
+				})
+			default:
+				mdl.messages = append(mdl.messages, chatMessage{
+					role: "assistant", content: "Please enter 1 (current folder) or 2 (new folder):",
+				})
+				return app.NoCmd(mdl)
 			}
 		}
 
-		// Spec approved - ask about folder location
-		if a.specReady && (input == "yes" || input == "y") {
-			a.input.Reset()
-			a.askingFolder = true
-			// Extract project name from spec for folder suggestion
-			a.projectName = a.getProjectNameFromSpec()
-			a.messages = append(a.messages, chatMessage{
-				role:    "assistant",
-				content: fmt.Sprintf("Where should I create the project?\n\n  1) Here (current folder: %s)\n  2) New folder: %s/\n\nEnter 1 or 2:", filepath.Base(a.repoRoot), a.projectName),
+		// Spec approved
+		if mdl.specReady && (inputLower == "yes" || inputLower == "y") {
+			_, newInput := mdl.input.Submit()
+			mdl.input = newInput
+			mdl.askingFolder = true
+			mdl.projectName = getProjectNameFromSpec(mdl.spec)
+			mdl.messages = append(mdl.messages, chatMessage{
+				role: "assistant",
+				content: fmt.Sprintf("Where should I create the project?\n\n  1) Here (current folder: %s)\n  2) New folder: %s/\n\nEnter 1 or 2:", filepath.Base(mdl.repoRoot), mdl.projectName),
 			})
-			a.updateChatViewport()
-			return a, nil
+			return app.NoCmd(mdl)
 		}
 
-		if !a.waiting && strings.TrimSpace(a.input.Value()) != "" {
-			userMsg := strings.TrimSpace(a.input.Value())
-			a.messages = append(a.messages, chatMessage{
-				role:    "user",
-				content: userMsg,
-			})
-			// Save to project
-			if a.proj != nil {
-				a.proj.AddMessage("user", userMsg)
+		// Send message
+		if !mdl.waiting && inputVal != "" {
+			text, newInput := mdl.input.Submit()
+			mdl.input = newInput
+			mdl.messages = append(mdl.messages, chatMessage{role: "user", content: text})
+			if mdl.proj != nil {
+				mdl.proj.AddMessage("user", text)
 			}
-			a.input.Reset()
-			a.waiting = true
-			a.updateChatViewport()
-			return a, a.sendMessage(userMsg)
+			mdl.waiting = true
+			mdl.scrollOffset = 0
+			return app.WithCmd(mdl, sendMessageCmd(mdl, text), tickCmd())
 		}
 
 	default:
-		if !a.waiting {
-			var cmd tea.Cmd
-			a.input, cmd = a.input.Update(msg)
-			return a, cmd
+		if !mdl.waiting {
+			mdl.input = mdl.input.Update(msg.Key)
 		}
 	}
 
-	return a, nil
+	return app.NoCmd(mdl)
 }
 
-func (a *App) handleExecuteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyUp:
-		if a.selectedIdx > 0 {
-			a.selectedIdx--
+func handleExecuteKey(mdl *Model, msg app.KeyMsg) app.UpdateResult {
+	switch msg.Key.Type {
+	case input.Up:
+		if mdl.selectedIdx > 0 {
+			mdl.selectedIdx--
 		}
-	case tea.KeyDown:
-		if a.execState != nil && a.selectedIdx < len(a.execState.Phases)-1 {
-			a.selectedIdx++
+	case input.Down:
+		if mdl.execState != nil && mdl.selectedIdx < len(mdl.execState.Phases)-1 {
+			mdl.selectedIdx++
 		}
-	case tea.KeyPgUp:
-		// Scroll viewport up
-		a.execVP, _ = a.execVP.Update(msg)
-	case tea.KeyPgDown:
-		// Scroll viewport down
-		a.execVP, _ = a.execVP.Update(msg)
-	case tea.KeyEnter:
-		// Toggle expand/collapse
-		if a.execState != nil && a.selectedIdx < len(a.execState.Phases) {
-			a.execState.Phases[a.selectedIdx].Expanded = !a.execState.Phases[a.selectedIdx].Expanded
+	case input.Enter:
+		if mdl.execState != nil && mdl.selectedIdx < len(mdl.execState.Phases) {
+			mdl.execState.Phases[mdl.selectedIdx].Expanded = !mdl.execState.Phases[mdl.selectedIdx].Expanded
 		}
-	case tea.KeyRunes:
-		switch string(msg.Runes) {
-		case "j":
-			// Scroll down
-			for i := 0; i < 3; i++ {
-				a.execVP, _ = a.execVP.Update(tea.KeyMsg{Type: tea.KeyDown})
+	case input.RuneKey:
+		switch msg.Key.Rune {
+		case 'p':
+			if mdl.execState != nil && !mdl.execState.Paused {
+				return app.WithCmd(mdl, func() app.Msg { return PauseMsg{} })
 			}
-		case "k":
-			// Scroll up
-			for i := 0; i < 3; i++ {
-				a.execVP, _ = a.execVP.Update(tea.KeyMsg{Type: tea.KeyUp})
+		case 'r':
+			if mdl.execState != nil && mdl.execState.Paused {
+				return app.WithCmd(mdl, func() app.Msg { return ResumeMsg{} })
 			}
-		case "p":
-			if a.execState != nil && !a.execState.Paused {
-				return a, func() tea.Msg { return PauseMsg{} }
+		case 'q':
+			return app.UpdateResult{Model: nil}
+		case 'j':
+			mdl.autoScrollOffset -= 3
+			if mdl.autoScrollOffset < 0 {
+				mdl.autoScrollOffset = 0
 			}
-		case "r":
-			if a.execState != nil && a.execState.Paused {
-				return a, func() tea.Msg { return ResumeMsg{} }
-			}
-		case "q":
-			return a, tea.Quit
+		case 'k':
+			mdl.autoScrollOffset += 3
 		}
 	}
-
-	return a, nil
+	return app.NoCmd(mdl)
 }
 
-func (a *App) allPhasesDone() bool {
-	if a.execState == nil {
-		return false
-	}
-	for _, p := range a.execState.Phases {
-		if p.Status == "pending" || p.Status == "running" {
-			return false
+// --- View ---
+
+func tuiView(m interface{}, focused string) node.Node {
+	mdl := m.(*Model)
+
+	switch mdl.mode {
+	case ModeDiscovery:
+		return viewDiscovery(mdl)
+	case ModeExecute:
+		if mdl.autonomous {
+			return viewAutonomous(mdl)
 		}
+		return viewExecute(mdl)
 	}
-	return true
+	return viewDiscovery(mdl)
 }
 
-func (a *App) sendMessage(msg string) tea.Cmd {
-	return func() tea.Msg {
-		response, err := a.discovery.SendMessage(msg)
+func viewDiscovery(mdl *Model) node.Node {
+	w := mdl.width
+
+	// Header
+	modeText := "Discovery"
+	if mdl.proj != nil && mdl.proj.HasConversation() && len(mdl.messages) > 1 {
+		modeText = "Discovery (resumed)"
+	}
+	headerText := fmt.Sprintf(" %s  %s", Logo(), modeText)
+	pad := w - len([]rune(headerText))
+	if pad < 0 {
+		pad = 0
+	}
+	header := node.TextStyled(headerText+strings.Repeat(" ", pad), colPrimary, colDarkBg, node.Bold)
+
+	// Chat messages
+	var chatNodes []node.Node
+	for _, msg := range mdl.messages {
+		chatNodes = append(chatNodes, node.Text(""))
+		if msg.role == "user" {
+			for i, line := range strings.Split(msg.content, "\n") {
+				prefix := "      "
+				if i == 0 {
+					prefix = "  You: "
+				}
+				chatNodes = append(chatNodes, node.TextStyled(prefix+line, colSecondary, 0, 0))
+			}
+		} else {
+			for i, line := range strings.Split(msg.content, "\n") {
+				prefix := "     "
+				if i == 0 {
+					prefix = "  🐺 "
+				}
+				chatNodes = append(chatNodes, node.TextStyled(prefix+line, colText, 0, 0))
+			}
+		}
+	}
+
+	if mdl.waiting {
+		frame := spinnerFrames[mdl.spinnerIdx]
+		chatNodes = append(chatNodes,
+			node.Text(""),
+			node.TextStyled("  🐺 "+frame+" thinking...", colMuted, 0, node.Italic),
+		)
+	}
+
+	conversation := node.Column(chatNodes...).WithFlex(1).WithScrollToBottom().WithScrollOffset(mdl.scrollOffset)
+
+	// Spec box
+	var specNode node.Node
+	if mdl.specReady {
+		specNode = renderSpecNode(mdl.spec, w)
+	} else {
+		specNode = node.Text("")
+	}
+
+	// Input
+	sep := node.TextStyled(strings.Repeat("─", w), colDim, 0, 0)
+	inputLine := mdl.input.Render("  > ", colWhite, 0)
+
+	// Help
+	helpText := " Enter: send • Shift+Enter: newline • PgUp/PgDn: scroll • Esc: quit"
+	if mdl.specReady {
+		helpText = " Type 'yes' to build •" + helpText
+	}
+	helpPad := w - len([]rune(helpText))
+	if helpPad < 0 {
+		helpPad = 0
+	}
+	help := node.TextStyled(helpText+strings.Repeat(" ", helpPad), colMuted, colDarkBg, 0)
+
+	return node.Column(
+		header,
+		node.TextStyled(strings.Repeat("─", w), colDim, 0, 0),
+		conversation,
+		specNode,
+		sep,
+		inputLine,
+		sep,
+		help,
+	)
+}
+
+func renderSpecNode(spec map[string]any, width int) node.Node {
+	if spec == nil {
+		return node.Text("")
+	}
+
+	var lines []node.Node
+	lines = append(lines, node.TextStyled("  📋 READY TO BUILD", colAccent, 0, node.Bold))
+
+	if goal, ok := spec["goal"].(string); ok {
+		lines = append(lines, node.TextStyled("  "+goal, colPrimary, 0, 0))
+	}
+	if pn, ok := spec["project_name"].(string); ok && pn != "" && pn != "." {
+		lines = append(lines, node.Row(
+			node.TextStyled("  Project: ", colMuted, 0, 0),
+			node.TextStyled(pn+"/", colSecondary, 0, node.Bold),
+		))
+	}
+	if lang, ok := spec["language"].(string); ok {
+		lines = append(lines, node.Row(
+			node.TextStyled("  Language: ", colMuted, 0, 0),
+			node.TextStyled(lang, colSecondary, 0, node.Bold),
+		))
+	}
+	if fw, ok := spec["framework"].(string); ok && fw != "" {
+		lines = append(lines, node.Row(
+			node.TextStyled("  Framework: ", colMuted, 0, 0),
+			node.TextStyled(fw, colSecondary, 0, node.Bold),
+		))
+	}
+	if features, ok := spec["features"].([]any); ok && len(features) > 0 {
+		lines = append(lines, node.TextStyled("  Features:", colMuted, 0, 0))
+		for _, f := range features {
+			if fs, ok := f.(string); ok {
+				lines = append(lines, node.TextStyled("    • "+fs, colPrimary, 0, 0))
+			}
+		}
+	}
+
+	inner := node.Column(lines...)
+	return node.Box(node.BorderRounded, inner)
+}
+
+func viewExecute(mdl *Model) node.Node {
+	if mdl.execState == nil {
+		return node.TextStyled("  Initializing...", colMuted, 0, 0)
+	}
+	frame := spinnerFrames[mdl.spinnerIdx]
+	return RenderExecuteView(mdl.execState, mdl.width, mdl.selectedIdx, frame)
+}
+
+func viewAutonomous(mdl *Model) node.Node {
+	w := mdl.width
+	frame := spinnerFrames[mdl.spinnerIdx]
+
+	// Header
+	headerText := fmt.Sprintf(" %s  Autonomous Execution  %s", Logo(), frame)
+	pad := w - len([]rune(headerText))
+	if pad < 0 {
+		pad = 0
+	}
+	header := node.TextStyled(headerText+strings.Repeat(" ", pad), colPrimary, colDarkBg, node.Bold)
+
+	// Output
+	var outputNodes []node.Node
+	content := strings.Join(mdl.autonomousOutput, "")
+	if content == "" {
+		content = "Starting..."
+	}
+	for _, line := range strings.Split(content, "\n") {
+		outputNodes = append(outputNodes, node.TextStyled("  "+line, colText, 0, 0))
+	}
+
+	output := node.Column(outputNodes...).WithFlex(1).WithScrollToBottom().WithScrollOffset(mdl.autoScrollOffset)
+
+	// Footer
+	helpText := " Esc: cancel • PgUp/PgDn: scroll • j/k: scroll"
+	helpPad := w - len([]rune(helpText))
+	if helpPad < 0 {
+		helpPad = 0
+	}
+	footer := node.TextStyled(helpText+strings.Repeat(" ", helpPad), colMuted, colDarkBg, 0)
+
+	return node.Column(
+		header,
+		node.TextStyled(strings.Repeat("─", w), colDim, 0, 0),
+		output,
+		node.TextStyled(strings.Repeat("─", w), colDim, 0, 0),
+		footer,
+	)
+}
+
+// --- Commands ---
+
+func tickCmd() app.Cmd {
+	return func() app.Msg {
+		time.Sleep(100 * time.Millisecond)
+		return TickMsg{}
+	}
+}
+
+func sendMessageCmd(mdl *Model, msg string) app.Cmd {
+	return func() app.Msg {
+		response, err := mdl.discovery.SendMessage(msg)
 		return ResponseMsg{Content: response, Err: err}
 	}
 }
 
-func (a *App) initExecuteState() {
-	projectName := "."
-	if pn, ok := a.spec["project_name"].(string); ok && pn != "" {
-		projectName = pn
-	}
-	a.execState = NewExecuteState(projectName, a.buildTaskFromSpec())
-}
-
-func (a *App) runExecute() tea.Cmd {
-	// Create a cancellable context for pause support
+func (mdl *Model) runExecuteCmd() app.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
-	a.cancelExec = cancel
+	mdl.cancelExec = cancel
 
-	// Capture program reference for sending updates
-	program := a.program
-
-	return func() tea.Msg {
-		task := a.buildTaskFromSpec()
-
-		// Use the project from the app (already opened in NewAppForProject)
-		proj := a.proj
+	return func() app.Msg {
+		task := mdl.buildTaskFromSpec()
+		proj := mdl.proj
 		if proj == nil {
 			return ExecuteDoneMsg{Err: fmt.Errorf("no project initialized")}
 		}
-
-		// Ensure spec is set
-		if a.spec != nil {
-			proj.SetSpec(a.spec)
+		if mdl.spec != nil {
+			proj.SetSpec(mdl.spec)
 		}
-
-		// Start the job
 		proj.StartJob()
 
-		spec, err := orchestrator.LoadSpecWithOverrides(a.agentDir, a.spec)
+		spec, err := orchestrator.LoadSpecWithOverrides(mdl.agentDir, mdl.spec)
 		if err != nil {
 			proj.SetJobStatus(project.JobStatusFailed, err.Error())
 			return ExecuteDoneMsg{Err: err}
 		}
 
-		// Use project's phases directory for run output
 		runDir := filepath.Join(proj.KyoteeDir, project.PhasesDir)
-		engine, err := orchestrator.NewEngineWithRunDir(spec, task, a.repoRoot, a.agentDir, runDir)
+		engine, err := orchestrator.NewEngineWithRunDir(spec, task, mdl.repoRoot, mdl.agentDir, runDir)
 		if err != nil {
 			proj.SetJobStatus(project.JobStatusFailed, err.Error())
 			return ExecuteDoneMsg{Err: err}
 		}
 
-		// Store run dir
-		if a.execState != nil {
-			a.execState.RunDir = engine.RunDir
+		if mdl.execState != nil {
+			mdl.execState.RunDir = engine.RunDir
 		}
 
-		// Connect engine callbacks to update TUI and project state
-		engine.OnPhase = func(idx int, status types.PhaseStatus) {
-			phaseID := engine.State.Phases[idx].Phase.ID
-			switch status {
-			case types.PhaseRunning:
-				proj.UpdatePhase(phaseID, "running")
-				if program != nil {
-					program.Send(PhaseStartMsg{PhaseID: phaseID})
-				}
-			case types.PhasePassed:
-				proj.UpdatePhase(phaseID, "passed")
-				if program != nil {
-					program.Send(PhaseEndMsg{PhaseID: phaseID, Passed: true})
-				}
-			case types.PhaseFailed:
-				proj.UpdatePhase(phaseID, "failed")
-				if program != nil {
-					program.Send(PhaseEndMsg{PhaseID: phaseID, Passed: false})
-				}
-			}
-		}
+		// Note: In Tooey, we can't send messages to the app from callbacks directly.
+		// The engine callbacks won't update the TUI in real-time without a message channel.
+		// For now, we run and return the final result.
 
-		engine.OnOutput = func(phaseID, text string) {
-			if program != nil {
-				program.Send(PhaseOutputMsg{PhaseID: phaseID, Line: text})
-			}
-		}
-
-		engine.OnNarrate = func(text string) {
-			if program != nil {
-				program.Send(NarrationMsg{Text: text})
-			}
-		}
-
-		// Run with context for pause support
 		if err := engine.RunWithContext(ctx); err != nil {
-			// Check if this was a pause (not a real error)
 			if errors.Is(err, orchestrator.ErrPaused) {
 				proj.SetJobStatus(project.JobStatusPaused, "")
-				return ExecuteDoneMsg{Err: nil} // Not an error, just paused
+				return ExecuteDoneMsg{Err: nil}
+			}
+			if cpErr, ok := err.(*types.ErrCheckpoint); ok {
+				proj.SetJobStatus("checkpoint", "")
+				return CheckpointMsg{Checkpoint: cpErr.Checkpoint}
 			}
 			proj.SetJobStatus(project.JobStatusFailed, err.Error())
 			return ExecuteDoneMsg{Err: err}
@@ -812,49 +845,43 @@ func (a *App) runExecute() tea.Cmd {
 	}
 }
 
-func (a *App) runAutonomous() tea.Cmd {
+func (mdl *Model) runAutonomousCmd() app.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
-	a.cancelExec = cancel
+	mdl.cancelExec = cancel
 
-	program := a.program
+	// We need a channel to send intermediate messages back to the app
+	// Tooey's Cmd returns a single Msg, but we can use a goroutine pattern
+	// where intermediate outputs are sent via additional cmds.
+	// For autonomous mode, we'll collect all output and send periodic updates.
 
-	return func() tea.Msg {
-		// Build task from spec
-		task := a.buildTaskFromSpec()
+	return func() app.Msg {
+		task := mdl.buildTaskFromSpec()
 
-		// Get skill content if available
 		skillContent := ""
-		if a.discovery != nil && a.discovery.ActiveSkill != nil {
-			skillContent = a.discovery.ActiveSkill.ToPromptContext()
+		if mdl.discovery != nil && mdl.discovery.ActiveSkill != nil {
+			skillContent = mdl.discovery.ActiveSkill.ToPromptContext()
 		}
 
-		// Create autonomous engine
-		engine := orchestrator.NewAutonomousEngine(a.spec, task, a.repoRoot, a.agentDir)
+		engine := orchestrator.NewAutonomousEngine(mdl.spec, task, mdl.repoRoot, mdl.agentDir)
 		engine.SkillContent = skillContent
 
-		// Connect callbacks
+		// Since Tooey commands return a single Msg, we accumulate output
+		// and push it through the model directly (safe since this runs in a goroutine)
 		engine.OnOutput = func(text string) {
-			if program != nil {
-				program.Send(AutonomousOutput{Text: text})
-			}
+			mdl.autonomousOutput = append(mdl.autonomousOutput, text)
 		}
 
 		engine.OnPhase = func(phase, status string) {
-			if program != nil {
-				program.Send(AutonomousOutput{Text: fmt.Sprintf("\n[%s] %s\n", phase, status)})
-			}
+			mdl.autonomousOutput = append(mdl.autonomousOutput, fmt.Sprintf("\n[%s] %s\n", phase, status))
 		}
 
 		engine.OnTool = func(name string, input any) {
-			if program != nil {
-				program.Send(AutonomousToolMsg{Name: name, Input: input})
-			}
+			mdl.autonomousOutput = append(mdl.autonomousOutput, fmt.Sprintf("🔧 %s\n", name))
 		}
 
-		// Run autonomously
 		if err := engine.Run(ctx); err != nil {
 			if errors.Is(err, context.Canceled) {
-				return ExecuteDoneMsg{Err: nil} // User cancelled
+				return ExecuteDoneMsg{Err: nil}
 			}
 			return ExecuteDoneMsg{Err: err}
 		}
@@ -863,81 +890,88 @@ func (a *App) runAutonomous() tea.Cmd {
 	}
 }
 
-func (a *App) buildTaskFromSpec() string {
-	if a.spec == nil {
+// --- Helpers ---
+
+func allPhasesDone(mdl *Model) bool {
+	if mdl.execState == nil {
+		return false
+	}
+	for _, p := range mdl.execState.Phases {
+		if p.Status == "pending" || p.Status == "running" {
+			return false
+		}
+	}
+	return true
+}
+
+func (mdl *Model) buildTaskFromSpec() string {
+	if mdl.spec == nil {
 		return "Build the project"
 	}
-
 	var parts []string
-	if goal, ok := a.spec["goal"].(string); ok {
+	if goal, ok := mdl.spec["goal"].(string); ok {
 		parts = append(parts, goal)
 	}
-	if features, ok := a.spec["features"].([]any); ok {
+	if features, ok := mdl.spec["features"].([]any); ok {
 		for _, f := range features {
 			if fs, ok := f.(string); ok {
 				parts = append(parts, "- "+fs)
 			}
 		}
 	}
-
 	return strings.Join(parts, "\n")
 }
 
-func (a *App) getProjectNameFromSpec() string {
-	if a.spec == nil {
+func (mdl *Model) initExecuteState() {
+	projectName := "."
+	if pn, ok := mdl.spec["project_name"].(string); ok && pn != "" {
+		projectName = pn
+	}
+	mdl.execState = NewExecuteState(projectName, mdl.buildTaskFromSpec())
+}
+
+func getProjectNameFromSpec(spec map[string]any) string {
+	if spec == nil {
 		return "my-project"
 	}
-
-	// Try to get project name from spec
-	if name, ok := a.spec["project_name"].(string); ok && name != "" {
+	if name, ok := spec["project_name"].(string); ok && name != "" {
 		return sanitizeFolderName(name)
 	}
-	if name, ok := a.spec["name"].(string); ok && name != "" {
+	if name, ok := spec["name"].(string); ok && name != "" {
 		return sanitizeFolderName(name)
 	}
-	// Try to derive from goal
-	if goal, ok := a.spec["goal"].(string); ok && goal != "" {
-		// Take first few words and convert to kebab-case
+	if goal, ok := spec["goal"].(string); ok && goal != "" {
 		words := strings.Fields(goal)
 		if len(words) > 3 {
 			words = words[:3]
 		}
-		name := strings.ToLower(strings.Join(words, "-"))
-		return sanitizeFolderName(name)
+		return sanitizeFolderName(strings.ToLower(strings.Join(words, "-")))
 	}
-
 	return "my-project"
 }
 
 func sanitizeFolderName(name string) string {
-	// Convert to lowercase, replace spaces with hyphens, remove special chars
 	name = strings.ToLower(name)
 	name = strings.ReplaceAll(name, " ", "-")
-	// Keep only alphanumeric and hyphens
 	var result strings.Builder
 	for _, r := range name {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
 			result.WriteRune(r)
 		}
 	}
-	// Trim leading/trailing hyphens
 	return strings.Trim(result.String(), "-")
 }
 
-func setupProjectFolder(a *App, newPath string) error {
-	// Create new folder
+func setupProjectFolder(mdl *Model, newPath string) error {
 	if err := os.MkdirAll(newPath, 0755); err != nil {
 		return fmt.Errorf("create folder: %w", err)
 	}
 
-	// Move .kyotee from current location to new folder
-	oldKyotee := filepath.Join(a.repoRoot, ".kyotee")
+	oldKyotee := filepath.Join(mdl.repoRoot, ".kyotee")
 	newKyotee := filepath.Join(newPath, ".kyotee")
 
 	if _, err := os.Stat(oldKyotee); err == nil {
-		// .kyotee exists, move it
 		if err := os.Rename(oldKyotee, newKyotee); err != nil {
-			// If rename fails (cross-device), try copy
 			if err := copyDir(oldKyotee, newKyotee); err != nil {
 				return fmt.Errorf("move .kyotee: %w", err)
 			}
@@ -945,19 +979,15 @@ func setupProjectFolder(a *App, newPath string) error {
 		}
 	}
 
-	// Update project reference
-	if a.proj != nil {
+	if mdl.proj != nil {
 		newProj, err := project.Open(newPath)
 		if err == nil {
-			// Copy spec to new project
-			newProj.SetSpec(a.spec)
-			a.proj = newProj
+			newProj.SetSpec(mdl.spec)
+			mdl.proj = newProj
 		}
 	}
 
-	// Create CLAUDE.md
 	createClaudeMD(newPath)
-
 	return nil
 }
 
@@ -970,33 +1000,15 @@ This project was scaffolded by [Kyotee](https://github.com/stukennedy/kyotee), a
 
 The ` + "`.kyotee/`" + ` folder contains:
 
-- **` + "`spec.json`" + `** - The approved specification that defines what this project should do
-- **` + "`conversation.json`" + `** - Discovery conversation history (for context/resume)
-
-## For Claude Code
-
-When working on this project, you can reference the spec for requirements:
-
-` + "```bash" + `
-cat .kyotee/spec.json
-` + "```" + `
-
-The spec is the source of truth for:
-- Project purpose and features
-- Tech stack decisions
-- Architecture choices made during discovery
+- **` + "`spec.json`" + `** - The approved specification
+- **` + "`conversation.json`" + `** - Discovery conversation history
 
 ## Resuming Work
-
-If the project is incomplete, you can resume with:
 
 ` + "```bash" + `
 kyotee --continue
 ` + "```" + `
-
-This will pick up where the last session left off.
 `
-
 	claudePath := filepath.Join(projectPath, "CLAUDE.md")
 	os.WriteFile(claudePath, []byte(claudeMD), 0644)
 }
@@ -1006,238 +1018,15 @@ func copyDir(src, dst string) error {
 		if err != nil {
 			return err
 		}
-
 		relPath, _ := filepath.Rel(src, path)
 		dstPath := filepath.Join(dst, relPath)
-
 		if info.IsDir() {
 			return os.MkdirAll(dstPath, info.Mode())
 		}
-
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
 		return os.WriteFile(dstPath, data, info.Mode())
 	})
-}
-
-func (a *App) updateLayout() {
-	if a.width == 0 || a.height == 0 {
-		return
-	}
-
-	inputHeight := 5
-	headerHeight := 3
-	specHeight := 0
-	if a.specReady {
-		specHeight = 8
-	}
-
-	vpHeight := a.height - inputHeight - headerHeight - specHeight - 4
-
-	if !a.ready {
-		a.chatVP = viewport.New(a.width-4, vpHeight)
-		a.execVP = viewport.New(a.width-4, a.height-10)
-		a.ready = true
-	} else {
-		a.chatVP.Width = a.width - 4
-		a.chatVP.Height = vpHeight
-		a.execVP.Width = a.width - 4
-		a.execVP.Height = a.height - 10
-	}
-
-	a.input.SetWidth(a.width - 4)
-	a.updateChatViewport()
-}
-
-func (a *App) updateChatViewport() {
-	if !a.ready {
-		return
-	}
-
-	contentWidth := a.chatVP.Width - 6
-	if contentWidth < 20 {
-		contentWidth = 20
-	}
-
-	var b strings.Builder
-	for _, msg := range a.messages {
-		if msg.role == "user" {
-			prefix := UserMsgStyle.Render("You: ")
-			b.WriteString(prefix)
-			wrapped := wordwrap.String(msg.content, contentWidth)
-			lines := strings.Split(wrapped, "\n")
-			for i, line := range lines {
-				if i > 0 {
-					b.WriteString("      ")
-				}
-				b.WriteString(UserContentStyle.Render(line))
-				if i < len(lines)-1 {
-					b.WriteString("\n")
-				}
-			}
-		} else {
-			prefix := AssistantMsgStyle.Render("🐺 ")
-			b.WriteString(prefix)
-			wrapped := wordwrap.String(msg.content, contentWidth)
-			lines := strings.Split(wrapped, "\n")
-			for i, line := range lines {
-				if i > 0 {
-					b.WriteString("   ")
-				}
-				b.WriteString(AssistantContentStyle.Render(line))
-				if i < len(lines)-1 {
-					b.WriteString("\n")
-				}
-			}
-		}
-		b.WriteString("\n\n")
-	}
-
-	if a.waiting {
-		b.WriteString(AssistantMsgStyle.Render("🐺 "))
-		b.WriteString(ThinkingStyle.Render(a.spinner.View() + " thinking..."))
-	}
-
-	a.chatVP.SetContent(b.String())
-	a.chatVP.GotoBottom()
-}
-
-func (a App) View() string {
-	if !a.ready {
-		return "Loading..."
-	}
-
-	switch a.mode {
-	case ModeDiscovery:
-		return a.viewDiscovery()
-	case ModeExecute:
-		return a.viewExecute()
-	default:
-		return a.viewDiscovery()
-	}
-}
-
-func (a App) viewDiscovery() string {
-	var b strings.Builder
-
-	// Show "Resumed" indicator if we loaded existing state
-	modeText := "Discovery"
-	if a.proj != nil && a.proj.HasConversation() && len(a.messages) > 1 {
-		modeText = "Discovery " + PhasePassedStyle.Render("(resumed)")
-	}
-
-	header := HeaderStyle.Width(a.width).Render(
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			Logo(),
-			"  ",
-			TitleStyle.Render(modeText),
-		),
-	)
-	b.WriteString(header)
-	b.WriteString("\n")
-
-	chatBox := ChatBoxStyle.Width(a.width - 2).Render(a.chatVP.View())
-	b.WriteString(chatBox)
-	b.WriteString("\n")
-
-	if a.specReady {
-		specView := a.renderSpec()
-		b.WriteString(specView)
-		b.WriteString("\n")
-	}
-
-	inputBox := InputBoxStyle.Width(a.width - 2).Render(a.input.View())
-	b.WriteString(inputBox)
-	b.WriteString("\n")
-
-	help := "Enter: send • Ctrl+J: newline • PgUp/PgDn: scroll • Esc: quit"
-	if a.specReady {
-		help = "Type 'yes' to start building • " + help
-	}
-	b.WriteString(HelpStyle.Render(help))
-
-	return b.String()
-}
-
-func (a App) renderSpec() string {
-	if a.spec == nil {
-		return ""
-	}
-
-	var lines []string
-	lines = append(lines, SpecTitleStyle.Render("📋 READY TO BUILD"))
-
-	if goal, ok := a.spec["goal"].(string); ok {
-		lines = append(lines, fmt.Sprintf("  %s", PhasePassedStyle.Render(goal)))
-	}
-	if projectName, ok := a.spec["project_name"].(string); ok && projectName != "" && projectName != "." {
-		lines = append(lines, fmt.Sprintf("  %s %s", HelpStyle.Render("Project:"), TitleStyle.Render(projectName+"/")))
-	}
-	if lang, ok := a.spec["language"].(string); ok {
-		lines = append(lines, fmt.Sprintf("  %s %s", HelpStyle.Render("Language:"), TitleStyle.Render(lang)))
-	}
-	if framework, ok := a.spec["framework"].(string); ok && framework != "" {
-		lines = append(lines, fmt.Sprintf("  %s %s", HelpStyle.Render("Framework:"), TitleStyle.Render(framework)))
-	}
-	if features, ok := a.spec["features"].([]any); ok && len(features) > 0 {
-		lines = append(lines, fmt.Sprintf("  %s", HelpStyle.Render("Features:")))
-		for _, f := range features {
-			if fs, ok := f.(string); ok {
-				lines = append(lines, fmt.Sprintf("    %s %s", PhasePassedStyle.Render("•"), fs))
-			}
-		}
-	}
-
-	return SpecBoxStyle.Width(a.width - 2).Render(strings.Join(lines, "\n"))
-}
-
-func (a App) viewExecute() string {
-	// Autonomous mode uses different rendering
-	if a.autonomous {
-		return a.viewAutonomous()
-	}
-
-	if a.execState == nil {
-		return "Initializing..."
-	}
-
-	return RenderExecuteView(a.execState, a.width, a.selectedIdx, a.spinner.View())
-}
-
-func (a App) viewAutonomous() string {
-	var b strings.Builder
-
-	// Header
-	header := HeaderStyle.Width(a.width).Render(
-		lipgloss.JoinHorizontal(lipgloss.Left,
-			Logo(),
-			"  ",
-			TitleStyle.Render("Autonomous Execution"),
-			"  ",
-			a.spinner.View(),
-		),
-	)
-	b.WriteString(header)
-	b.WriteString("\n\n")
-
-	// Output viewport
-	content := strings.Join(a.autonomousOutput, "")
-	if content == "" {
-		content = "Starting..."
-	}
-
-	wrapped := wordwrap.String(content, a.width-4)
-	a.execVP.SetContent(wrapped)
-
-	outputBox := ChatBoxStyle.Width(a.width - 2).Height(a.height - 8).Render(a.execVP.View())
-	b.WriteString(outputBox)
-	b.WriteString("\n")
-
-	// Help
-	help := HelpStyle.Render("Esc: cancel • PgUp/PgDn: scroll")
-	b.WriteString(help)
-
-	return b.String()
 }

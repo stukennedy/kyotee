@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/muesli/reflow/wordwrap"
+	"github.com/stukennedy/tooey/node"
 )
 
 // PhaseProgress tracks the progress of a single phase
@@ -14,8 +14,8 @@ type PhaseProgress struct {
 	Status    string // pending, running, passed, failed
 	StartTime time.Time
 	EndTime   time.Time
-	Output    []string // Lines of output
-	Expanded  bool     // Whether details are shown
+	Output    []string
+	Expanded  bool
 	Files     []FileChange
 	Gates     []GateProgress
 }
@@ -33,6 +33,15 @@ type GateProgress struct {
 	Output string
 }
 
+// CheckpointState holds checkpoint UI state
+type CheckpointState struct {
+	Active      bool
+	Type        string   // human-verify, decision, human-action
+	Message     string
+	Options     []string
+	SelectedOpt int
+}
+
 // ExecuteState holds the full execution state
 type ExecuteState struct {
 	ProjectName string
@@ -43,6 +52,7 @@ type ExecuteState struct {
 	RunDir      string
 	Paused      bool
 	Error       error
+	Checkpoint  *CheckpointState
 }
 
 // NewExecuteState creates initial execution state
@@ -61,87 +71,71 @@ func NewExecuteState(projectName, task string) *ExecuteState {
 	}
 }
 
-// RenderExecuteView renders the execute mode view
-func RenderExecuteView(state *ExecuteState, width, selectedIdx int, spinner string) string {
-	var b strings.Builder
-
-	// Header with project info
-	header := fmt.Sprintf("Building: %s", state.ProjectName)
-	if state.ProjectName == "" || state.ProjectName == "." {
-		header = "Building in current directory"
+// RenderPhaseBar renders the phase indicator row
+func RenderPhaseBar(phases []PhaseProgress, width int) node.Node {
+	var items []node.Node
+	for i, p := range phases {
+		var icon string
+		var fg node.Color
+		switch p.Status {
+		case "pending":
+			icon = "○"
+			fg = colMuted
+		case "running":
+			icon = "●"
+			fg = colWarning
+		case "passed":
+			icon = "✓"
+			fg = colPrimary
+		case "failed":
+			icon = "✗"
+			fg = colError
+		}
+		label := fmt.Sprintf(" %s %s ", icon, p.ID)
+		items = append(items, node.TextStyled(label, fg, 0, node.Bold))
+		if i < len(phases)-1 {
+			items = append(items, node.TextStyled("→", colDim, 0, 0))
+		}
 	}
-	b.WriteString(HeaderStyle.Width(width).Render(
-		Logo() + "  " + TitleStyle.Render(header),
-	))
-	b.WriteString("\n\n")
-
-	// Task summary (truncated)
-	taskPreview := state.Task
-	if len(taskPreview) > 80 {
-		taskPreview = taskPreview[:77] + "..."
-	}
-	b.WriteString(HelpStyle.Render("Task: " + taskPreview))
-	b.WriteString("\n\n")
-
-	// Phases
-	for i, phase := range state.Phases {
-		isSelected := i == selectedIdx
-		b.WriteString(renderPhase(&phase, width-4, isSelected, spinner))
-		b.WriteString("\n")
-	}
-
-	// Error display
-	if state.Error != nil {
-		b.WriteString("\n")
-		b.WriteString(PhaseFailedStyle.Render(fmt.Sprintf("Error: %v", state.Error)))
-		b.WriteString("\n")
-	}
-
-	// Footer with controls
-	b.WriteString("\n")
-	if state.Paused {
-		b.WriteString(WarningStyle.Render("⏸ PAUSED") + HelpStyle.Render(" • r: resume • q: quit • ↑↓: select • j/k: scroll • enter: expand"))
-	} else {
-		b.WriteString(HelpStyle.Render("p: pause • q: quit • ↑↓: select • j/k: scroll • enter: expand"))
-	}
-
-	return b.String()
+	return node.Row(items...)
 }
 
-func renderPhase(phase *PhaseProgress, width int, selected bool, spinner string) string {
-	var b strings.Builder
+// RenderPhaseDetail renders expanded phase output
+func RenderPhaseDetail(phase *PhaseProgress, width int, selected bool, spinnerFrame string) []node.Node {
+	var nodes []node.Node
 
-	// Phase header line
+	// Phase header
 	var icon string
-	var style = PhasePendingStyle
+	var fg node.Color
+	var style node.StyleFlags
 	switch phase.Status {
 	case "pending":
 		icon = "○"
-		style = PhasePendingStyle
+		fg = colMuted
 	case "running":
-		icon = spinner
-		style = PhaseActiveStyle
+		icon = spinnerFrame
+		fg = colWarning
+		style = node.Bold
 	case "passed":
 		icon = "✓"
-		style = PhasePassedStyle
+		fg = colPrimary
+		style = node.Bold
 	case "failed":
 		icon = "✗"
-		style = PhaseFailedStyle
+		fg = colError
+		style = node.Bold
 	}
 
-	// Selection indicator with color
 	selector := "  "
 	if selected {
-		selector = SelectedStyle.Render("› ")
+		selector = "› "
 	}
 
-	// Expand/collapse indicator
 	expandIcon := "▶"
 	if phase.Expanded {
 		expandIcon = "▼"
 	}
 
-	// Duration
 	duration := ""
 	if !phase.StartTime.IsZero() {
 		end := phase.EndTime
@@ -155,73 +149,190 @@ func renderPhase(phase *PhaseProgress, width int, selected bool, spinner string)
 	}
 
 	header := fmt.Sprintf("%s%s %s %s%s", selector, expandIcon, icon, phase.ID, duration)
-	b.WriteString(style.Render(header))
-	b.WriteString("\n")
+	selectorFG := colSecondary
+	if !selected {
+		selectorFG = fg
+	}
+	nodes = append(nodes, node.TextStyled(header, selectorFG, 0, style))
 
 	// Expanded content
 	if phase.Expanded && len(phase.Output) > 0 {
-		contentWidth := width - 6
-		if contentWidth < 20 {
-			contentWidth = 20
-		}
-
-		// Show last N lines of output
 		maxLines := 10
 		startIdx := 0
 		if len(phase.Output) > maxLines {
 			startIdx = len(phase.Output) - maxLines
-			b.WriteString(OutputTextStyle.Render(fmt.Sprintf("      ... (%d more lines)\n", startIdx)))
+			nodes = append(nodes, node.TextStyled(
+				fmt.Sprintf("      ... (%d more lines)", startIdx), colMuted, 0, node.Dim))
 		}
-
 		for _, line := range phase.Output[startIdx:] {
-			wrapped := wordwrap.String(line, contentWidth)
-			for _, wline := range strings.Split(wrapped, "\n") {
-				b.WriteString("      ")
-				b.WriteString(OutputTextStyle.Render(wline))
-				b.WriteString("\n")
-			}
+			nodes = append(nodes, node.TextStyled("      "+line, colText, 0, 0))
 		}
 
-		// File changes with colored icons
+		// File changes
 		if len(phase.Files) > 0 {
-			b.WriteString(OutputTextStyle.Render("      Files:\n"))
+			nodes = append(nodes, node.TextStyled("      Files:", colMuted, 0, 0))
 			for _, f := range phase.Files {
-				var styled string
+				var fc node.Color
+				var prefix string
 				switch f.Action {
 				case "create":
-					styled = FileAddStyle.Render(fmt.Sprintf("+ %s", f.Path))
+					fc = colFileAdd
+					prefix = "+"
 				case "modify":
-					styled = FileModifyStyle.Render(fmt.Sprintf("~ %s", f.Path))
+					fc = colFileMod
+					prefix = "~"
 				case "delete":
-					styled = FileDeleteStyle.Render(fmt.Sprintf("- %s", f.Path))
+					fc = colFileDel
+					prefix = "-"
 				default:
-					styled = OutputTextStyle.Render(fmt.Sprintf("• %s", f.Path))
+					fc = colText
+					prefix = "•"
 				}
-				b.WriteString(fmt.Sprintf("        %s\n", styled))
+				nodes = append(nodes, node.TextStyled(
+					fmt.Sprintf("        %s %s", prefix, f.Path), fc, 0, 0))
 			}
 		}
 
 		// Gates
 		if len(phase.Gates) > 0 {
-			b.WriteString(OutputTextStyle.Render("      Gates:\n"))
+			nodes = append(nodes, node.TextStyled("      Gates:", colMuted, 0, 0))
 			for _, g := range phase.Gates {
 				gIcon := "○"
-				gStyle := PhasePendingStyle
+				gFG := colMuted
 				switch g.Status {
 				case "running":
-					gIcon = spinner
-					gStyle = PhaseActiveStyle
+					gIcon = "●"
+					gFG = colWarning
 				case "passed":
 					gIcon = "✓"
-					gStyle = PhasePassedStyle
+					gFG = colPrimary
 				case "failed":
 					gIcon = "✗"
-					gStyle = PhaseFailedStyle
+					gFG = colError
 				}
-				b.WriteString(gStyle.Render(fmt.Sprintf("        %s %s\n", gIcon, g.Name)))
+				nodes = append(nodes, node.TextStyled(
+					fmt.Sprintf("        %s %s", gIcon, g.Name), gFG, 0, 0))
 			}
 		}
 	}
 
-	return b.String()
+	return nodes
+}
+
+// RenderCheckpoint renders the checkpoint UI
+func RenderCheckpoint(cp *CheckpointState) []node.Node {
+	if cp == nil || !cp.Active {
+		return nil
+	}
+
+	var nodes []node.Node
+	var icon string
+	switch cp.Type {
+	case "human-verify":
+		icon = "🔍"
+	case "decision":
+		icon = "🤔"
+	case "human-action":
+		icon = "👤"
+	default:
+		icon = "⏸"
+	}
+
+	nodes = append(nodes,
+		node.Text(""),
+		node.TextStyled(fmt.Sprintf("%s CHECKPOINT [%s]", icon, cp.Type), colWarning, 0, node.Bold),
+		node.TextStyled("  "+cp.Message, colText, 0, 0),
+	)
+
+	if len(cp.Options) > 0 {
+		for i, opt := range cp.Options {
+			prefix := "  "
+			fg := colText
+			if i == cp.SelectedOpt {
+				prefix = "› "
+				fg = colSecondary
+			}
+			nodes = append(nodes, node.TextStyled(
+				fmt.Sprintf("  %s%d) %s", prefix, i+1, opt), fg, 0, 0))
+		}
+	}
+
+	return nodes
+}
+
+// RenderExecuteView renders the full execute mode as a node tree
+func RenderExecuteView(state *ExecuteState, width, selectedIdx int, spinnerFrame string) node.Node {
+	// Header
+	headerText := fmt.Sprintf(" %s  Building: %s", Logo(), state.ProjectName)
+	if state.ProjectName == "" || state.ProjectName == "." {
+		headerText = fmt.Sprintf(" %s  Building in current directory", Logo())
+	}
+	pad := width - len([]rune(headerText))
+	if pad < 0 {
+		pad = 0
+	}
+	header := node.TextStyled(headerText+strings.Repeat(" ", pad), colPrimary, colDarkBg, node.Bold)
+
+	// Task summary
+	taskPreview := state.Task
+	if len(taskPreview) > 80 {
+		taskPreview = taskPreview[:77] + "..."
+	}
+	taskLine := node.TextStyled(" Task: "+taskPreview, colMuted, 0, 0)
+
+	// Phase bar
+	phaseBar := RenderPhaseBar(state.Phases, width)
+
+	// Phase details (scrollable)
+	var detailNodes []node.Node
+	for i := range state.Phases {
+		nodes := RenderPhaseDetail(&state.Phases[i], width-4, i == selectedIdx, spinnerFrame)
+		detailNodes = append(detailNodes, nodes...)
+	}
+
+	// Error
+	if state.Error != nil {
+		detailNodes = append(detailNodes,
+			node.Text(""),
+			node.TextStyled(fmt.Sprintf("Error: %v", state.Error), colError, 0, node.Bold),
+		)
+	}
+
+	// Checkpoint
+	if cpNodes := RenderCheckpoint(state.Checkpoint); cpNodes != nil {
+		detailNodes = append(detailNodes, cpNodes...)
+	}
+
+	details := node.Column(detailNodes...).WithFlex(1).WithScrollToBottom()
+
+	// Footer
+	var helpText string
+	if state.Checkpoint != nil && state.Checkpoint.Active {
+		if len(state.Checkpoint.Options) > 0 {
+			helpText = " ⏸ CHECKPOINT • ↑↓: select • enter: confirm • q: quit"
+		} else {
+			helpText = " ⏸ CHECKPOINT • y: approve • n: reject • q: quit"
+		}
+	} else if state.Paused {
+		helpText = " ⏸ PAUSED • r: resume • q: quit • ↑↓: select • enter: expand"
+	} else {
+		helpText = " p: pause • q: quit • ↑↓: select • enter: expand"
+	}
+	helpPad := width - len([]rune(helpText))
+	if helpPad < 0 {
+		helpPad = 0
+	}
+	footer := node.TextStyled(helpText+strings.Repeat(" ", helpPad), colMuted, colDarkBg, 0)
+
+	return node.Column(
+		header,
+		node.TextStyled(strings.Repeat("─", width), colDim, 0, 0),
+		taskLine,
+		node.Text(""),
+		phaseBar,
+		node.Text(""),
+		details,
+		node.TextStyled(strings.Repeat("─", width), colDim, 0, 0),
+		footer,
+	)
 }

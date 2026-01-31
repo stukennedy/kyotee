@@ -77,13 +77,14 @@ func (s PhaseStatus) String() string {
 
 // PhaseState holds runtime state for a phase
 type PhaseState struct {
-	Phase      Phase
-	Status     PhaseStatus
-	Iteration  int
-	Output     string
-	Narration  string
-	Error      error
+	Phase       Phase
+	Status      PhaseStatus
+	Iteration   int
+	Output      string
+	Narration   string
+	Error       error
 	ControlJSON map[string]any
+	SubPlan     *SubPlanState // Non-nil during chunked implement execution
 }
 
 // RunState holds the entire run's state
@@ -94,6 +95,53 @@ type RunState struct {
 	CurrentPhase    int
 	TotalIterations int
 	RunDir          string
+}
+
+// SubPlanState tracks progress of a chunked sub-plan within the implement phase
+type SubPlanState struct {
+	ChunkIndex     int          // Which chunk we're on (0-based)
+	TotalChunks    int          // Total number of chunks
+	StepGroups     [][]PlanStep // Steps grouped into chunks
+	CompletedFiles []string     // Files created/modified so far
+	CumulativeDiff string       // Git diff after each chunk
+	Checkpoint     *Checkpoint  // Non-nil if waiting for human input
+	CheckpointResolutions []string // Past checkpoint resolutions for context
+}
+
+// PlanStep represents a single step from the plan phase output
+type PlanStep struct {
+	ID            string   `json:"id"`
+	Goal          string   `json:"goal"`
+	Actions       []string `json:"actions"`
+	ExpectedFiles []string `json:"expected_files"`
+	Checks        []string `json:"checks"`
+}
+
+// CheckpointType represents the kind of checkpoint
+type CheckpointType string
+
+const (
+	CheckpointVerify   CheckpointType = "human-verify"
+	CheckpointDecision CheckpointType = "decision"
+	CheckpointAction   CheckpointType = "human-action"
+)
+
+// Checkpoint represents a mid-build pause requesting human input
+type Checkpoint struct {
+	Type       CheckpointType `json:"type"`
+	Message    string         `json:"message"`
+	Options    []string       `json:"options,omitempty"`    // For decision type
+	Resolution string         `json:"resolution,omitempty"` // Human's response
+	ResolvedAt string         `json:"resolved_at,omitempty"`
+}
+
+// ErrCheckpoint is returned when a checkpoint is hit during execution
+type ErrCheckpoint struct {
+	Checkpoint Checkpoint
+}
+
+func (e *ErrCheckpoint) Error() string {
+	return "checkpoint: " + string(e.Checkpoint.Type) + ": " + e.Checkpoint.Message
 }
 
 // Evidence from phase outputs
