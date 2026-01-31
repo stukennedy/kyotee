@@ -16,6 +16,7 @@ import (
 
 	"github.com/stukennedy/kyotee/internal/orchestrator"
 	"github.com/stukennedy/kyotee/internal/project"
+	"github.com/stukennedy/kyotee/internal/skills"
 	"github.com/stukennedy/kyotee/internal/types"
 )
 
@@ -804,6 +805,18 @@ func (mdl *Model) runExecuteCmd() app.Cmd {
 		if mdl.spec != nil {
 			proj.SetSpec(mdl.spec)
 		}
+
+		// Generate AGENTS.md for non-autonomous mode too
+		if mdl.spec != nil {
+			var skill *skills.Skill
+			if mdl.discovery != nil && mdl.discovery.ActiveSkill != nil {
+				skill = mdl.discovery.ActiveSkill
+			} else if mdl.discovery != nil && mdl.discovery.SkillRegistry != nil {
+				skill = orchestrator.MatchSkillFromSpec(mdl.spec, mdl.discovery.SkillRegistry)
+			}
+			orchestrator.GenerateAgentsFile(mdl.spec, skill, mdl.repoRoot)
+		}
+
 		proj.StartJob()
 
 		spec, err := orchestrator.LoadSpecWithOverrides(mdl.agentDir, mdl.spec)
@@ -857,9 +870,26 @@ func (mdl *Model) runAutonomousCmd() app.Cmd {
 	return func() app.Msg {
 		task := mdl.buildTaskFromSpec()
 
-		skillContent := ""
+		// Deterministic skill matching from spec + generate AGENTS.md
+		var skill *skills.Skill
 		if mdl.discovery != nil && mdl.discovery.ActiveSkill != nil {
-			skillContent = mdl.discovery.ActiveSkill.ToPromptContext()
+			skill = mdl.discovery.ActiveSkill
+		} else if mdl.discovery != nil && mdl.discovery.SkillRegistry != nil && mdl.spec != nil {
+			skill = orchestrator.MatchSkillFromSpec(mdl.spec, mdl.discovery.SkillRegistry)
+		}
+
+		// Generate AGENTS.md — the single static context file
+		if mdl.spec != nil {
+			if _, err := orchestrator.GenerateAgentsFile(mdl.spec, skill, mdl.repoRoot); err != nil {
+				mdl.autonomousOutput = append(mdl.autonomousOutput, fmt.Sprintf("⚠ Failed to generate AGENTS.md: %v\n", err))
+			} else {
+				mdl.autonomousOutput = append(mdl.autonomousOutput, "📄 Generated .kyotee/AGENTS.md (static context)\n")
+			}
+		}
+
+		skillContent := ""
+		if skill != nil {
+			skillContent = skill.ToPromptContext()
 		}
 
 		engine := orchestrator.NewAutonomousEngine(mdl.spec, task, mdl.repoRoot, mdl.agentDir)

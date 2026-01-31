@@ -212,6 +212,11 @@ func (e *AutonomousEngine) extractAndOutput(event map[string]any) {
 func (e *AutonomousEngine) buildFullPrompt() (string, error) {
 	var parts []string
 
+	// Prepend AGENTS.md if available (primary context — everything in one file)
+	if agentsContent, err := LoadAgentsFile(e.RepoRoot); err == nil && agentsContent != "" {
+		parts = append(parts, agentsContent)
+	}
+
 	// System context
 	systemPrompt, err := e.buildSystemPrompt()
 	if err != nil {

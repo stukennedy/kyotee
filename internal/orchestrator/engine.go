@@ -505,15 +505,22 @@ func (e *Engine) buildChunkPrompt(chunk []types.PlanStep, subPlan *types.SubPlan
 			strings.Join(subPlan.CheckpointResolutions, "\n")
 	}
 
-	parts := []string{
+	parts := []string{}
+
+	// Prepend AGENTS.md if available (primary context)
+	if agentsContent, err := LoadAgentsFile(e.RepoRoot); err == nil && agentsContent != "" {
+		parts = append(parts, agentsContent)
+	}
+
+	parts = append(parts,
 		systemPrompt,
 		phasePrompt,
-		"TASK:\n" + e.Task,
+		"TASK:\n"+e.Task,
 		fmt.Sprintf("CHUNK %d of %d — IMPLEMENT ONLY THESE STEPS:\n%s",
 			subPlan.ChunkIndex+1, subPlan.TotalChunks,
 			strings.Join(stepDescs, "\n\n")),
-		"CUMULATIVE CONTEXT:\n" + cumulativeCtx,
-	}
+		"CUMULATIVE CONTEXT:\n"+cumulativeCtx,
+	)
 	if checkpointCtx != "" {
 		parts = append(parts, checkpointCtx)
 	}
@@ -671,14 +678,23 @@ func (e *Engine) buildPrompt(phaseID, schemaPath string) (string, error) {
 		diff = "<none>"
 	}
 
-	return strings.Join([]string{
+	parts := []string{}
+
+	// Prepend AGENTS.md if available (primary context)
+	if agentsContent, err := LoadAgentsFile(e.RepoRoot); err == nil && agentsContent != "" {
+		parts = append(parts, agentsContent)
+	}
+
+	parts = append(parts,
 		systemPrompt,
 		phasePrompt,
-		"TASK:\n" + e.Task,
-		"CURRENT_GIT_DIFF:\n" + diff,
-		"REQUIRED JSON SCHEMA:\n" + schemaContent,
+		"TASK:\n"+e.Task,
+		"CURRENT_GIT_DIFF:\n"+diff,
+		"REQUIRED JSON SCHEMA:\n"+schemaContent,
 		"INSTRUCTIONS:\nReturn ONLY a valid JSON object matching the schema above. No markdown, no explanation, just the JSON.",
-	}, "\n\n"), nil
+	)
+
+	return strings.Join(parts, "\n\n"), nil
 }
 
 func (e *Engine) callWorker(prompt, phaseID string) (string, error) {
