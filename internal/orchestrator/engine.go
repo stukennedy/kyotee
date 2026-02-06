@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stukennedy/kyotee/internal/claude"
 	"github.com/stukennedy/kyotee/internal/config"
 	"github.com/stukennedy/kyotee/internal/types"
 )
@@ -204,15 +205,10 @@ func (e *Engine) RunWithContext(ctx context.Context) error {
 }
 
 func (e *Engine) executePhaseWithContext(ctx context.Context, phase *types.PhaseState) error {
-	// For implement phase, use chunked execution if plan output is available
+	// For implement phase, use Ralph Wiggum pattern (fresh context each iteration)
+	// This prevents context degradation during long tool-calling sessions
 	if phase.Phase.ID == "implement" {
-		planPhase := e.findPhaseByID("plan")
-		if planPhase != nil && planPhase.ControlJSON != nil {
-			if steps, err := e.extractPlanSteps(planPhase.ControlJSON); err == nil && len(steps) > 0 {
-				return e.executeChunkedImplement(ctx, phase)
-			}
-		}
-		// Fall through to single-call if no plan steps available
+		return e.executeRalphImplement(ctx, phase)
 	}
 
 	// Build prompt
@@ -284,7 +280,124 @@ func (e *Engine) executePhaseWithContext(ctx context.Context, phase *types.Phase
 	return nil
 }
 
+// executeRalphImplement runs the implement phase using the Ralph Wiggum pattern.
+// Each iteration runs in a fresh context window - state persists on disk, not in
+// conversation history. The model stays sharp because context never accumulates.
+func (e *Engine) executeRalphImplement(ctx context.Context, phase *types.PhaseState) error {
+	if e.OnOutput != nil {
+		e.OnOutput("implement", "🐺 Ralph mode: fresh context each iteration\n")
+	}
+
+	// Build task description from plan if available
+	taskDesc := e.Task
+	planPhase := e.findPhaseByID("plan")
+	if planPhase != nil && planPhase.ControlJSON != nil {
+		if steps, err := e.extractPlanSteps(planPhase.ControlJSON); err == nil && len(steps) > 0 {
+			var stepDescs []string
+			for _, s := range steps {
+				stepDescs = append(stepDescs, fmt.Sprintf("- %s: %s", s.ID, s.Goal))
+			}
+			taskDesc = fmt.Sprintf("%s\n\n## Implementation Plan\n%s", e.Task, strings.Join(stepDescs, "\n"))
+		}
+	}
+
+	// Build system prompt from agent prompts
+	systemPrompt, err := config.LoadPrompt(e.AgentDir, "system")
+	if err != nil {
+		systemPrompt = "You are Kyotee, an autonomous development agent."
+	}
+
+	implPrompt, err := config.LoadPrompt(e.AgentDir, "phase_implement")
+	if err == nil {
+		systemPrompt += "\n\n" + implPrompt
+	}
+
+	// Add AGENTS.md context if available
+	if agentsContent, err := LoadAgentsFile(e.RepoRoot); err == nil && agentsContent != "" {
+		systemPrompt = agentsContent + "\n\n" + systemPrompt
+	}
+
+	// Create Claude client
+	client, err := claude.NewClient()
+	if err != nil {
+		return fmt.Errorf("failed to create Claude client: %w", err)
+	}
+
+	// Create tool executor
+	executor := claude.NewToolExecutor(e.RepoRoot)
+
+	// Create Ralph runner
+	ralph := claude.NewRalphRunner(client, executor, e.RepoRoot, systemPrompt)
+	ralph.MaxIterations = 100
+	ralph.MaxToolCalls = 25
+
+	// Create phase output directory
+	phaseDir := filepath.Join(e.RunDir, phase.Phase.ID, fmt.Sprintf("iter_%d", phase.Iteration))
+	if err := os.MkdirAll(phaseDir, 0755); err != nil {
+		return fmt.Errorf("failed to create phase dir: %w", err)
+	}
+
+	// Wire up callbacks
+	ralph.OnIteration = func(iteration int, state *claude.RalphState) {
+		if e.OnOutput != nil {
+			e.OnOutput("implement", fmt.Sprintf("\n🔄 Iteration %d (step: %s)\n", iteration, state.CurrentStep))
+		}
+	}
+
+	ralph.OnMessage = func(content string) {
+		if e.OnOutput != nil {
+			e.OnOutput("implement", content)
+		}
+	}
+
+	ralph.OnToolCall = func(name string, input any) {
+		if e.OnOutput != nil {
+			e.OnOutput("implement", fmt.Sprintf("🔧 %s ", name))
+		}
+	}
+
+	ralph.OnToolResult = func(name string, result string, isError bool) {
+		if e.OnOutput != nil {
+			status := "✓"
+			if isError {
+				status = "✗"
+			}
+			// Truncate long results
+			display := result
+			if len(display) > 150 {
+				display = display[:150] + "..."
+			}
+			e.OnOutput("implement", fmt.Sprintf("%s\n", status))
+		}
+	}
+
+	ralph.OnComplete = func(result string) {
+		if e.OnOutput != nil {
+			e.OnOutput("implement", "\n✅ Implementation complete\n")
+		}
+		// Save final result
+		_ = os.WriteFile(filepath.Join(phaseDir, "ralph_result.md"), []byte(result), 0644)
+	}
+
+	// Run Ralph
+	result, err := ralph.Run(ctx, taskDesc)
+	if err != nil {
+		return fmt.Errorf("ralph execution failed: %w", err)
+	}
+
+	// Store result in phase
+	phase.Output = result
+	phase.ControlJSON = map[string]any{
+		"phase":  "implement",
+		"mode":   "ralph",
+		"result": result,
+	}
+
+	return nil
+}
+
 // executeChunkedImplement runs the implement phase as multiple sub-plan chunks
+// DEPRECATED: Use executeRalphImplement instead for better context management
 func (e *Engine) executeChunkedImplement(ctx context.Context, phase *types.PhaseState) error {
 	// Get the plan phase output
 	planPhase := e.findPhaseByID("plan")
