@@ -12,6 +12,7 @@ import (
 	"github.com/stukennedy/tooey/app"
 	"github.com/stukennedy/tooey/component"
 	"github.com/stukennedy/tooey/input"
+	"github.com/stukennedy/tooey/markdown"
 	"github.com/stukennedy/tooey/node"
 
 	"github.com/stukennedy/kyotee/internal/orchestrator"
@@ -27,9 +28,6 @@ const (
 	ModeDiscovery AppMode = iota
 	ModeExecute
 )
-
-// Spinner frames
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // --- Message types ---
 
@@ -51,7 +49,6 @@ type (
 	AutonomousOutput     struct{ Text string }
 	AutonomousToolMsg    struct{ Name string; Input any }
 	FolderSelectedMsg    struct{ Path string; IsNew bool }
-	TickMsg              struct{}
 )
 
 // Model is the TUI application state
@@ -252,9 +249,9 @@ func tuiUpdate(m interface{}, msg app.Msg) app.UpdateResult {
 	case app.KeyMsg:
 		return handleKey(mdl, msg)
 
-	case TickMsg:
-		mdl.spinnerIdx = (mdl.spinnerIdx + 1) % len(spinnerFrames)
-		return app.WithCmd(mdl, tickCmd())
+	case component.SpinnerTickMsg:
+		mdl.spinnerIdx++
+		return app.WithCmd(mdl, component.SpinnerTick(100*time.Millisecond))
 
 	// Discovery responses
 	case ResponseMsg:
@@ -303,7 +300,7 @@ func tuiUpdate(m interface{}, msg app.Msg) app.UpdateResult {
 		mdl.mode = ModeExecute
 		mdl.autonomous = true
 		mdl.autonomousOutput = []string{"🚀 Starting autonomous execution...\n\n"}
-		return app.WithCmd(mdl, mdl.runAutonomousCmd(), tickCmd())
+		return app.WithSub(mdl, mdl.autonomousSub())
 
 	case PhaseStartMsg:
 		if mdl.execState != nil {
@@ -429,7 +426,7 @@ func tuiUpdate(m interface{}, msg app.Msg) app.UpdateResult {
 
 	case AutonomousOutput:
 		mdl.autonomousOutput = append(mdl.autonomousOutput, msg.Text)
-		mdl.autoScrollOffset = 0 // auto-scroll to bottom
+		mdl.autoScrollOffset = 0
 
 	case AutonomousToolMsg:
 		mdl.autonomousOutput = append(mdl.autonomousOutput, fmt.Sprintf("🔧 %s\n", msg.Name))
@@ -446,14 +443,14 @@ func handleKey(mdl *Model, msg app.KeyMsg) app.UpdateResult {
 				if mdl.cancelExec != nil {
 					mdl.cancelExec()
 				}
-				return app.UpdateResult{Model: nil} // quit
+				return app.UpdateResult{Model: nil}
 			}
 			if mdl.execState != nil && (mdl.execState.Error != nil || allPhasesDone(mdl)) {
 				return app.UpdateResult{Model: nil}
 			}
 			return app.WithCmd(mdl, func() app.Msg { return PauseMsg{} })
 		}
-		return app.UpdateResult{Model: nil} // quit
+		return app.UpdateResult{Model: nil}
 
 	case input.PageUp:
 		if mdl.mode == ModeDiscovery {
@@ -535,7 +532,7 @@ func handleDiscoveryKey(mdl *Model, msg app.KeyMsg) app.UpdateResult {
 			}
 			mdl.waiting = true
 			mdl.scrollOffset = 0
-			return app.WithCmd(mdl, sendMessageCmd(mdl, text), tickCmd())
+			return app.WithCmd(mdl, sendMessageCmd(mdl, text), component.SpinnerTick(100*time.Millisecond))
 		}
 
 	default:
@@ -605,46 +602,41 @@ func tuiView(m interface{}, focused string) node.Node {
 func viewDiscovery(mdl *Model) node.Node {
 	w := mdl.width
 
-	// Header
+	// Header bar
 	modeText := "Discovery"
 	if mdl.proj != nil && mdl.proj.HasConversation() && len(mdl.messages) > 1 {
 		modeText = "Discovery (resumed)"
 	}
-	headerText := fmt.Sprintf(" %s  %s", Logo(), modeText)
-	pad := w - len([]rune(headerText))
-	if pad < 0 {
-		pad = 0
-	}
-	header := node.TextStyled(headerText+strings.Repeat(" ", pad), colPrimary, colDarkBg, node.Bold)
+	header := node.Bar(fmt.Sprintf(" %s  %s", Logo(), modeText), colPrimary, colDarkBg, node.Bold)
 
-	// Chat messages
+	// Chat messages rendered with markdown
 	var chatNodes []node.Node
 	for _, msg := range mdl.messages {
 		chatNodes = append(chatNodes, node.Text(""))
 		if msg.role == "user" {
-			for i, line := range strings.Split(msg.content, "\n") {
-				prefix := "      "
-				if i == 0 {
-					prefix = "  You: "
-				}
-				chatNodes = append(chatNodes, node.TextStyled(prefix+line, colSecondary, 0, 0))
+			label := node.TextStyled("  You: ", colSecondary, 0, node.Bold)
+			chatNodes = append(chatNodes, label)
+			rendered := markdown.RenderWithColors(msg.content, w-6, mdUser)
+			for _, n := range rendered {
+				chatNodes = append(chatNodes, node.Indent(6, n))
 			}
 		} else {
-			for i, line := range strings.Split(msg.content, "\n") {
-				prefix := "     "
-				if i == 0 {
-					prefix = "  🐺 "
-				}
-				chatNodes = append(chatNodes, node.TextStyled(prefix+line, colText, 0, 0))
+			label := node.TextStyled("  🐺 ", colPrimary, 0, 0)
+			chatNodes = append(chatNodes, label)
+			rendered := markdown.RenderWithColors(msg.content, w-5, mdAssistant)
+			for _, n := range rendered {
+				chatNodes = append(chatNodes, node.Indent(5, n))
 			}
 		}
 	}
 
 	if mdl.waiting {
-		frame := spinnerFrames[mdl.spinnerIdx]
 		chatNodes = append(chatNodes,
 			node.Text(""),
-			node.TextStyled("  🐺 "+frame+" thinking...", colMuted, 0, node.Italic),
+			node.Indent(2, node.Row(
+				node.TextStyled("🐺 ", colPrimary, 0, 0),
+				component.Spinner("thinking...", mdl.spinnerIdx, component.SpinnerDots, colMuted),
+			)),
 		)
 	}
 
@@ -653,39 +645,34 @@ func viewDiscovery(mdl *Model) node.Node {
 	// Spec box
 	var specNode node.Node
 	if mdl.specReady {
-		specNode = renderSpecNode(mdl.spec, w)
+		specNode = renderSpecNode(mdl.spec)
 	} else {
 		specNode = node.Text("")
 	}
 
-	// Input
-	sep := node.TextStyled(strings.Repeat("─", w), colDim, 0, 0)
-	inputLine := mdl.input.Render("  > ", colWhite, 0)
+	// Input area
+	inputLine := mdl.input.Render("  > ", colWhite, 0, w)
 
-	// Help
+	// Help bar
 	helpText := " Enter: send • Shift+Enter: newline • PgUp/PgDn: scroll • Esc: quit"
 	if mdl.specReady {
 		helpText = " Type 'yes' to build •" + helpText
 	}
-	helpPad := w - len([]rune(helpText))
-	if helpPad < 0 {
-		helpPad = 0
-	}
-	help := node.TextStyled(helpText+strings.Repeat(" ", helpPad), colMuted, colDarkBg, 0)
+	help := node.Bar(helpText, colMuted, colDarkBg, 0)
 
 	return node.Column(
 		header,
-		node.TextStyled(strings.Repeat("─", w), colDim, 0, 0),
+		node.Separator(w),
 		conversation,
 		specNode,
-		sep,
+		node.Separator(w),
 		inputLine,
-		sep,
+		node.Separator(w),
 		help,
 	)
 }
 
-func renderSpecNode(spec map[string]any, width int) node.Node {
+func renderSpecNode(spec map[string]any) node.Node {
 	if spec == nil {
 		return node.Text("")
 	}
@@ -731,59 +718,50 @@ func viewExecute(mdl *Model) node.Node {
 	if mdl.execState == nil {
 		return node.TextStyled("  Initializing...", colMuted, 0, 0)
 	}
-	frame := spinnerFrames[mdl.spinnerIdx]
+	frame := component.SpinnerFrames(component.SpinnerDots)[mdl.spinnerIdx%len(component.SpinnerFrames(component.SpinnerDots))]
 	return RenderExecuteView(mdl.execState, mdl.width, mdl.selectedIdx, frame)
 }
 
 func viewAutonomous(mdl *Model) node.Node {
 	w := mdl.width
-	frame := spinnerFrames[mdl.spinnerIdx]
 
-	// Header
-	headerText := fmt.Sprintf(" %s  Autonomous Execution  %s", Logo(), frame)
-	pad := w - len([]rune(headerText))
-	if pad < 0 {
-		pad = 0
-	}
-	header := node.TextStyled(headerText+strings.Repeat(" ", pad), colPrimary, colDarkBg, node.Bold)
+	// Header bar with spinner
+	header := node.Bar(
+		fmt.Sprintf(" %s  Autonomous Execution", Logo()),
+		colPrimary, colDarkBg, node.Bold,
+	)
 
-	// Output
-	var outputNodes []node.Node
+	// Spinner status line
+	statusLine := node.Indent(2, component.Spinner("running...", mdl.spinnerIdx, component.SpinnerDots, colWarning))
+
+	// Output rendered as markdown
 	content := strings.Join(mdl.autonomousOutput, "")
 	if content == "" {
 		content = "Starting..."
 	}
-	for _, line := range strings.Split(content, "\n") {
-		outputNodes = append(outputNodes, node.TextStyled("  "+line, colText, 0, 0))
+	outputNodes := markdown.RenderWithColors(content, w-2, mdAssistant)
+	var indented []node.Node
+	for _, n := range outputNodes {
+		indented = append(indented, node.Indent(2, n))
 	}
 
-	output := node.Column(outputNodes...).WithFlex(1).WithScrollToBottom().WithScrollOffset(mdl.autoScrollOffset)
+	output := node.Column(indented...).WithFlex(1).WithScrollToBottom().WithScrollOffset(mdl.autoScrollOffset)
 
-	// Footer
-	helpText := " Esc: cancel • PgUp/PgDn: scroll • j/k: scroll"
-	helpPad := w - len([]rune(helpText))
-	if helpPad < 0 {
-		helpPad = 0
-	}
-	footer := node.TextStyled(helpText+strings.Repeat(" ", helpPad), colMuted, colDarkBg, 0)
+	// Footer bar
+	footer := node.Bar(" Esc: cancel • PgUp/PgDn: scroll • j/k: scroll", colMuted, colDarkBg, 0)
 
 	return node.Column(
 		header,
-		node.TextStyled(strings.Repeat("─", w), colDim, 0, 0),
+		node.Separator(w),
+		statusLine,
+		node.Text(""),
 		output,
-		node.TextStyled(strings.Repeat("─", w), colDim, 0, 0),
+		node.Separator(w),
 		footer,
 	)
 }
 
 // --- Commands ---
-
-func tickCmd() app.Cmd {
-	return func() app.Msg {
-		time.Sleep(100 * time.Millisecond)
-		return TickMsg{}
-	}
-}
 
 func sendMessageCmd(mdl *Model, msg string) app.Cmd {
 	return func() app.Msg {
@@ -836,10 +814,6 @@ func (mdl *Model) runExecuteCmd() app.Cmd {
 			mdl.execState.RunDir = engine.RunDir
 		}
 
-		// Note: In Tooey, we can't send messages to the app from callbacks directly.
-		// The engine callbacks won't update the TUI in real-time without a message channel.
-		// For now, we run and return the final result.
-
 		if err := engine.RunWithContext(ctx); err != nil {
 			if errors.Is(err, orchestrator.ErrPaused) {
 				proj.SetJobStatus(project.JobStatusPaused, "")
@@ -858,16 +832,25 @@ func (mdl *Model) runExecuteCmd() app.Cmd {
 	}
 }
 
-func (mdl *Model) runAutonomousCmd() app.Cmd {
+// autonomousSub returns a Sub that streams autonomous execution output
+// back to the app via the send callback instead of mutating model directly.
+func (mdl *Model) autonomousSub() app.Sub {
 	ctx, cancel := context.WithCancel(context.Background())
 	mdl.cancelExec = cancel
 
-	// We need a channel to send intermediate messages back to the app
-	// Tooey's Cmd returns a single Msg, but we can use a goroutine pattern
-	// where intermediate outputs are sent via additional cmds.
-	// For autonomous mode, we'll collect all output and send periodic updates.
+	return func(send func(app.Msg)) app.Msg {
+		// Start spinner ticks
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(100 * time.Millisecond):
+					send(component.SpinnerTickMsg{})
+				}
+			}
+		}()
 
-	return func() app.Msg {
 		task := mdl.buildTaskFromSpec()
 
 		// Deterministic skill matching from spec + generate AGENTS.md
@@ -878,12 +861,12 @@ func (mdl *Model) runAutonomousCmd() app.Cmd {
 			skill = orchestrator.MatchSkillFromSpec(mdl.spec, mdl.discovery.SkillRegistry)
 		}
 
-		// Generate AGENTS.md — the single static context file
+		// Generate AGENTS.md
 		if mdl.spec != nil {
 			if _, err := orchestrator.GenerateAgentsFile(mdl.spec, skill, mdl.repoRoot); err != nil {
-				mdl.autonomousOutput = append(mdl.autonomousOutput, fmt.Sprintf("⚠ Failed to generate AGENTS.md: %v\n", err))
+				send(AutonomousOutput{Text: fmt.Sprintf("⚠ Failed to generate AGENTS.md: %v\n", err)})
 			} else {
-				mdl.autonomousOutput = append(mdl.autonomousOutput, "📄 Generated .kyotee/AGENTS.md (static context)\n")
+				send(AutonomousOutput{Text: "📄 Generated .kyotee/AGENTS.md (static context)\n"})
 			}
 		}
 
@@ -895,18 +878,17 @@ func (mdl *Model) runAutonomousCmd() app.Cmd {
 		engine := orchestrator.NewAutonomousEngine(mdl.spec, task, mdl.repoRoot, mdl.agentDir)
 		engine.SkillContent = skillContent
 
-		// Since Tooey commands return a single Msg, we accumulate output
-		// and push it through the model directly (safe since this runs in a goroutine)
+		// Stream output via send callback — safe, goes through the message loop
 		engine.OnOutput = func(text string) {
-			mdl.autonomousOutput = append(mdl.autonomousOutput, text)
+			send(AutonomousOutput{Text: text})
 		}
 
 		engine.OnPhase = func(phase, status string) {
-			mdl.autonomousOutput = append(mdl.autonomousOutput, fmt.Sprintf("\n[%s] %s\n", phase, status))
+			send(AutonomousOutput{Text: fmt.Sprintf("\n[%s] %s\n", phase, status)})
 		}
 
 		engine.OnTool = func(name string, input any) {
-			mdl.autonomousOutput = append(mdl.autonomousOutput, fmt.Sprintf("🔧 %s\n", name))
+			send(AutonomousToolMsg{Name: name, Input: input})
 		}
 
 		if err := engine.Run(ctx); err != nil {
@@ -950,14 +932,6 @@ func (mdl *Model) buildTaskFromSpec() string {
 		}
 	}
 	return strings.Join(parts, "\n")
-}
-
-func (mdl *Model) initExecuteState() {
-	projectName := "."
-	if pn, ok := mdl.spec["project_name"].(string); ok && pn != "" {
-		projectName = pn
-	}
-	mdl.execState = NewExecuteState(projectName, mdl.buildTaskFromSpec())
 }
 
 func getProjectNameFromSpec(spec map[string]any) string {

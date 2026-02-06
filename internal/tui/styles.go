@@ -1,6 +1,9 @@
 package tui
 
-import "github.com/stukennedy/tooey/node"
+import (
+	"github.com/stukennedy/tooey/markdown"
+	"github.com/stukennedy/tooey/node"
+)
 
 // Cyberpunk color palette (ANSI 256)
 const (
@@ -19,6 +22,35 @@ const (
 	colFileMod   node.Color = 214 // Amber
 	colFileDel   node.Color = 197 // Red
 	colDarkBg    node.Color = 236 // Dark background for bars
+)
+
+// Markdown color schemes for chat roles
+var (
+	mdAssistant = markdown.ColorScheme{
+		Text:     colText,
+		Heading:  colPrimary,
+		Code:     colSecondary,
+		CodeBG:   colDarkBg,
+		Quote:    colMuted,
+		Link:     colSecondary,
+		Bullet:   colPrimary,
+		CheckOn:  colPrimary,
+		CheckOff: colMuted,
+		Rule:     colDim,
+	}
+
+	mdUser = markdown.ColorScheme{
+		Text:     colSecondary,
+		Heading:  colSecondary,
+		Code:     colWhite,
+		CodeBG:   colDarkBg,
+		Quote:    colMuted,
+		Link:     colAccent,
+		Bullet:   colSecondary,
+		CheckOn:  colPrimary,
+		CheckOff: colMuted,
+		Rule:     colDim,
+	}
 )
 
 // Logo renders the kyotee logo text
