@@ -660,7 +660,7 @@ func viewDiscovery(mdl *Model) node.Node {
 
 	// Input
 	sep := node.TextStyled(strings.Repeat("─", w), colDim, 0, 0)
-	inputLine := mdl.input.Render("  > ", colWhite, 0)
+	inputLine := mdl.input.Render("  > ", colWhite, 0, 0)
 
 	// Help
 	helpText := " Enter: send • Shift+Enter: newline • PgUp/PgDn: scroll • Esc: quit"
