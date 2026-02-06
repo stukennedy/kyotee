@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/stukennedy/kyotee/internal/claude"
 	"github.com/stukennedy/kyotee/internal/config"
 )
 
@@ -311,6 +312,109 @@ func (e *AutonomousEngine) getRepoContext() (string, error) {
 	}
 
 	return strings.Join(files, "\n"), nil
+}
+
+// RunRalph executes the implementation using the Ralph Wiggum pattern.
+// Each iteration runs in a fresh context window - state persists on disk,
+// not in conversation history. The model stays sharp because context never accumulates.
+func (e *AutonomousEngine) RunRalph(ctx context.Context) error {
+	if e.OnPhase != nil {
+		e.OnPhase("execute", "running")
+	}
+
+	// Build system prompt
+	systemPrompt, err := e.buildSystemPrompt()
+	if err != nil {
+		return fmt.Errorf("failed to build system prompt: %w", err)
+	}
+
+	// Add spec context to system prompt
+	if e.Spec != nil {
+		specJSON, _ := json.MarshalIndent(e.Spec, "", "  ")
+		systemPrompt += "\n\n## Approved Spec\n```json\n" + string(specJSON) + "\n```"
+	}
+
+	// Add AGENTS.md context
+	if agentsContent, err := LoadAgentsFile(e.RepoRoot); err == nil && agentsContent != "" {
+		systemPrompt = agentsContent + "\n\n" + systemPrompt
+	}
+
+	// Create Claude client
+	client, err := claude.NewClient()
+	if err != nil {
+		return fmt.Errorf("failed to create client: %w", err)
+	}
+
+	// Create tool executor
+	executor := claude.NewToolExecutor(e.RepoRoot)
+
+	// Create Ralph runner
+	ralph := claude.NewRalphRunner(client, executor, e.RepoRoot, systemPrompt)
+	ralph.MaxIterations = 100
+	ralph.MaxToolCalls = 25
+
+	// Wire up callbacks
+	ralph.OnIteration = func(iteration int, state *claude.RalphState) {
+		if e.OnOutput != nil {
+			e.OnOutput(fmt.Sprintf("\n🔄 Ralph iteration %d (phase: %s, step: %s)\n",
+				iteration, state.Phase, state.CurrentStep))
+		}
+	}
+
+	ralph.OnMessage = func(content string) {
+		if e.OnOutput != nil {
+			e.OnOutput(content)
+		}
+	}
+
+	ralph.OnToolCall = func(name string, input any) {
+		if e.OnOutput != nil {
+			e.OnOutput(fmt.Sprintf("\n🔧 %s ", name))
+		}
+		if e.OnTool != nil {
+			e.OnTool(name, input)
+		}
+	}
+
+	ralph.OnToolResult = func(name string, result string, isError bool) {
+		if e.OnOutput != nil {
+			status := "✓"
+			if isError {
+				status = "✗"
+			}
+			// Truncate long results for display
+			display := result
+			if len(display) > 200 {
+				display = display[:200] + "..."
+			}
+			e.OnOutput(fmt.Sprintf("%s %s\n", status, display))
+		}
+	}
+
+	ralph.OnComplete = func(result string) {
+		if e.OnOutput != nil {
+			e.OnOutput("\n✅ Task completed\n")
+		}
+	}
+
+	// Run with Ralph pattern
+	result, err := ralph.Run(ctx, e.Task)
+	if err != nil {
+		if e.OnPhase != nil {
+			e.OnPhase("execute", "failed")
+		}
+		return err
+	}
+
+	if e.OnOutput != nil {
+		e.OnOutput(fmt.Sprintf("\n📋 Final result:\n%s\n", result))
+	}
+
+	if e.OnPhase != nil {
+		e.OnPhase("execute", "completed")
+	}
+
+	return nil
 }
 
 const defaultAutonomousPrompt = `You are Kyotee, an autonomous development agent. You implement projects based on approved specs.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,8 +18,9 @@ import (
 )
 
 var (
-	appPaths *paths.Paths
-	task     string
+	appPaths  *paths.Paths
+	task      string
+	ralphMode bool
 )
 
 func main() {
@@ -53,7 +55,24 @@ Commands:
 		RunE:  runTask,
 	}
 	runCmd.Flags().StringVarP(&task, "task", "t", "", "Task description")
+	runCmd.Flags().BoolVar(&ralphMode, "ralph", false, "Use Ralph Wiggum pattern (fresh context each iteration)")
 	runCmd.MarkFlagRequired("task")
+
+	ralphCmd := &cobra.Command{
+		Use:   "ralph",
+		Short: "Run task using Ralph Wiggum pattern (fresh context each iteration)",
+		Long: `Ralph Wiggum pattern: Each iteration runs in a fresh context window.
+State persists on disk, not in conversation history.
+The model stays sharp because context never accumulates.
+
+This is the recommended mode for long-running or complex tasks.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ralphMode = true
+			return runRalph(cmd, args)
+		},
+	}
+	ralphCmd.Flags().StringVarP(&task, "task", "t", "", "Task description")
+	ralphCmd.MarkFlagRequired("task")
 
 	jobsCmd := &cobra.Command{
 		Use:   "jobs",
@@ -74,7 +93,7 @@ Commands:
 		RunE:  initProject,
 	}
 
-	rootCmd.AddCommand(runCmd, jobsCmd, resumeCmd, initCmd)
+	rootCmd.AddCommand(runCmd, ralphCmd, jobsCmd, resumeCmd, initCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -113,6 +132,11 @@ func runDiscovery(cmd *cobra.Command, args []string) error {
 }
 
 func runTask(cmd *cobra.Command, args []string) error {
+	// If Ralph mode is enabled, use the Ralph runner
+	if ralphMode {
+		return runRalph(cmd, args)
+	}
+
 	specPath := appPaths.EffectiveSpecPath()
 	spec, err := config.LoadSpec(specPath)
 	if err != nil {
@@ -142,6 +166,40 @@ func runTask(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n✓ Done! Artifacts in: %s\n", engine.RunDir)
+	return nil
+}
+
+func runRalph(cmd *cobra.Command, args []string) error {
+	fmt.Println("🐺 KYOTEE - Ralph Wiggum Mode")
+	fmt.Println("Fresh context each iteration. State persists on disk.")
+	fmt.Println()
+	fmt.Printf("Task: %s\n", task)
+	fmt.Printf("Working dir: %s\n\n", appPaths.WorkDir)
+
+	// Create autonomous engine for Ralph mode
+	engine := orchestrator.NewAutonomousEngine(nil, task, appPaths.WorkDir, appPaths.UserDir)
+
+	engine.OnOutput = func(text string) {
+		fmt.Print(text)
+	}
+	engine.OnPhase = func(phase, status string) {
+		fmt.Printf("\n[%s] %s\n", phase, status)
+	}
+	engine.OnTool = func(name string, input any) {
+		// Tool call notification (already handled in OnOutput)
+	}
+
+	// Run with Ralph pattern
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := engine.RunRalph(ctx); err != nil {
+		return fmt.Errorf("ralph execution failed: %w", err)
+	}
+
+	fmt.Println("\n✓ Done!")
 	return nil
 }
 
