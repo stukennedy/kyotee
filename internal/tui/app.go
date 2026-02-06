@@ -642,7 +642,13 @@ func viewDiscovery(mdl *Model) node.Node {
 		)
 	}
 
-	conversation := node.Column(chatNodes...).WithFlex(1).WithScrollToBottom().WithScrollOffset(mdl.scrollOffset)
+	// When user scrolls (offset > 0), disable auto-scroll-to-bottom to prevent rendering artifacts
+	conversation := node.Column(chatNodes...).WithFlex(1)
+	if mdl.scrollOffset == 0 {
+		conversation = conversation.WithScrollToBottom()
+	} else {
+		conversation = conversation.WithScrollOffset(mdl.scrollOffset)
+	}
 
 	// Spec box
 	var specNode node.Node
@@ -748,7 +754,13 @@ func viewAutonomous(mdl *Model) node.Node {
 		indented = append(indented, node.Indent(2, n))
 	}
 
-	output := node.Column(indented...).WithFlex(1).WithScrollToBottom().WithScrollOffset(mdl.autoScrollOffset)
+	// When user scrolls (offset > 0), disable auto-scroll-to-bottom to prevent rendering artifacts
+	output := node.Column(indented...).WithFlex(1)
+	if mdl.autoScrollOffset == 0 {
+		output = output.WithScrollToBottom()
+	} else {
+		output = output.WithScrollOffset(mdl.autoScrollOffset)
+	}
 
 	// Footer bar
 	footer := node.Bar(" Esc: cancel • PgUp/PgDn: scroll • j/k: scroll", colMuted, colDarkBg, 0)
