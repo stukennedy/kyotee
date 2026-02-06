@@ -616,14 +616,16 @@ func viewDiscovery(mdl *Model) node.Node {
 		if msg.role == "user" {
 			label := node.TextStyled("  You: ", colSecondary, 0, node.Bold)
 			chatNodes = append(chatNodes, label)
-			rendered := markdown.RenderWithColors(msg.content, w-6, mdUser)
+			wrapped := WrapText(msg.content, w-8)
+			rendered := markdown.RenderWithColors(wrapped, w-6, mdUser)
 			for _, n := range rendered {
 				chatNodes = append(chatNodes, node.Indent(6, n))
 			}
 		} else {
 			label := node.TextStyled("  🐺 ", colPrimary, 0, 0)
 			chatNodes = append(chatNodes, label)
-			rendered := markdown.RenderWithColors(msg.content, w-5, mdAssistant)
+			wrapped := WrapText(msg.content, w-7)
+			rendered := markdown.RenderWithColors(wrapped, w-5, mdAssistant)
 			for _, n := range rendered {
 				chatNodes = append(chatNodes, node.Indent(5, n))
 			}
@@ -734,11 +736,12 @@ func viewAutonomous(mdl *Model) node.Node {
 	// Spinner status line
 	statusLine := node.Indent(2, component.Spinner("running...", mdl.spinnerIdx, component.SpinnerDots, colWarning))
 
-	// Output rendered as markdown
+	// Output rendered as markdown (wrap text first)
 	content := strings.Join(mdl.autonomousOutput, "")
 	if content == "" {
 		content = "Starting..."
 	}
+	content = WrapText(content, w-4) // Wrap before markdown parsing
 	outputNodes := markdown.RenderWithColors(content, w-2, mdAssistant)
 	var indented []node.Node
 	for _, n := range outputNodes {
