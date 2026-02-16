@@ -85,6 +85,9 @@ type Model struct {
 
 	// Animation
 	spinnerIdx int
+
+	// Double-press quit: tracks when Escape or Ctrl+C was last pressed
+	lastQuitKeyTime time.Time
 }
 
 type chatMessage struct {
@@ -244,6 +247,11 @@ func tuiUpdate(m interface{}, msg app.Msg) app.UpdateResult {
 			if mdl.autoScrollOffset < 0 {
 				mdl.autoScrollOffset = 0
 			}
+		}
+
+	case app.PasteMsg:
+		if mdl.mode == ModeDiscovery && !mdl.waiting {
+			mdl.input = mdl.input.Paste(msg.Text)
 		}
 
 	case app.KeyMsg:
@@ -435,22 +443,12 @@ func tuiUpdate(m interface{}, msg app.Msg) app.UpdateResult {
 	return app.NoCmd(mdl)
 }
 
+const quitKeyWindow = 1 * time.Second
+
 func handleKey(mdl *Model, msg app.KeyMsg) app.UpdateResult {
 	switch msg.Key.Type {
-	case input.Escape:
-		if mdl.mode == ModeExecute {
-			if mdl.autonomous {
-				if mdl.cancelExec != nil {
-					mdl.cancelExec()
-				}
-				return app.UpdateResult{Model: nil}
-			}
-			if mdl.execState != nil && (mdl.execState.Error != nil || allPhasesDone(mdl)) {
-				return app.UpdateResult{Model: nil}
-			}
-			return app.WithCmd(mdl, func() app.Msg { return PauseMsg{} })
-		}
-		return app.UpdateResult{Model: nil}
+	case input.Escape, input.CtrlC:
+		return handleQuitKey(mdl, msg)
 
 	case input.PageUp:
 		if mdl.mode == ModeDiscovery {
@@ -475,10 +473,75 @@ func handleKey(mdl *Model, msg app.KeyMsg) app.UpdateResult {
 		return app.NoCmd(mdl)
 	}
 
+	// Any other key resets the quit key timer
+	mdl.lastQuitKeyTime = time.Time{}
+
 	if mdl.mode == ModeDiscovery {
 		return handleDiscoveryKey(mdl, msg)
 	}
 	return handleExecuteKey(mdl, msg)
+}
+
+// handleQuitKey implements the double-press pattern for Escape and Ctrl+C.
+// First press: clears input or cancels in-flight work.
+// Second press (within 1s): quits the app.
+func handleQuitKey(mdl *Model, msg app.KeyMsg) app.UpdateResult {
+	now := time.Now()
+	recentPress := !mdl.lastQuitKeyTime.IsZero() && now.Sub(mdl.lastQuitKeyTime) < quitKeyWindow
+
+	if mdl.mode == ModeDiscovery {
+		// If there's text in the input, clear it first
+		if mdl.input.Value != "" {
+			mdl.input.Value = ""
+			mdl.input.Cursor = 0
+			mdl.lastQuitKeyTime = now
+			return app.NoCmd(mdl)
+		}
+		// If waiting for a response, cancel it
+		if mdl.waiting {
+			mdl.waiting = false
+			mdl.lastQuitKeyTime = now
+			return app.NoCmd(mdl)
+		}
+		// Nothing to clear — quit on second press, hint on first
+		if recentPress {
+			return app.UpdateResult{Model: nil}
+		}
+		mdl.lastQuitKeyTime = now
+		mdl.messages = append(mdl.messages, chatMessage{
+			role: "system", content: "Press again to quit.",
+		})
+		return app.NoCmd(mdl)
+	}
+
+	// Execute mode
+	if mdl.execState != nil && (mdl.execState.Error != nil || allPhasesDone(mdl)) {
+		// Execution finished or errored — quit immediately
+		return app.UpdateResult{Model: nil}
+	}
+
+	if mdl.autonomous {
+		// First press cancels, second press quits
+		if recentPress {
+			return app.UpdateResult{Model: nil}
+		}
+		if mdl.cancelExec != nil {
+			mdl.cancelExec()
+		}
+		mdl.lastQuitKeyTime = now
+		return app.NoCmd(mdl)
+	}
+
+	// Non-autonomous execute mode: first press pauses, second press quits
+	if recentPress {
+		return app.UpdateResult{Model: nil}
+	}
+	mdl.lastQuitKeyTime = now
+	if mdl.execState != nil && mdl.execState.Paused {
+		// Already paused — show quit hint
+		return app.NoCmd(mdl)
+	}
+	return app.WithCmd(mdl, func() app.Msg { return PauseMsg{} })
 }
 
 func handleDiscoveryKey(mdl *Model, msg app.KeyMsg) app.UpdateResult {
