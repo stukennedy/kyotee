@@ -5,11 +5,10 @@ go 1.24.0
 toolchain go1.24.12
 
 require (
-	github.com/BurntSushi/toml v1.6.0
-	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1
 	github.com/spf13/cobra v1.10.2
 	github.com/stukennedy/tooey v0.4.1
 	golang.org/x/term v0.39.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
