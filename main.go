@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -106,7 +107,7 @@ func rootCmd() *cobra.Command {
 				return err
 			}
 			prompt := strings.Join(args, " ")
-			ov := receptionist.Overrides{Strategy: strategy, Thinking: thinkingMode, MaxCostUSD: maxCost}
+			ov := receptionist.Overrides{Strategy: strategy, Thinking: thinkingMode, BudgetUSD: maxCost}
 			return askOnce(cmd.Context(), eng, prompt, ov)
 		},
 	}
@@ -125,7 +126,7 @@ func rootCmd() *cobra.Command {
 			if _, err := os.Stat(path); err == nil {
 				return fmt.Errorf("%s already exists", path)
 			}
-			if err := os.MkdirAll(strings.TrimSuffix(path, "/config.yaml"), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return err
 			}
 			data, err := configYAML()
@@ -140,7 +141,38 @@ func rootCmd() *cobra.Command {
 		},
 	}
 
-	root.AddCommand(serve, tuiCmd, ask, initCmd)
+	// config validate <file>: pre-flight the same validation hot-reload runs
+	// (spec 07 §3); prints errors and exits non-zero on invalid config.
+	configCmd := &cobra.Command{Use: "config", Short: "Config utilities"}
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "validate [file]",
+		Short: "Validate a config file and exit non-zero on errors",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := configPath
+			if len(args) > 0 {
+				path = args[0]
+			}
+			if path == "" {
+				path = config.DefaultPath()
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			cfg, err := config.Parse(data)
+			if err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			for _, w := range cfg.Warnings() {
+				fmt.Fprintln(os.Stderr, "warning:", w)
+			}
+			fmt.Println(path, "is valid")
+			return nil
+		},
+	})
+
+	root.AddCommand(serve, tuiCmd, ask, initCmd, configCmd)
 	return root
 }
 
@@ -149,11 +181,16 @@ func buildEngine(configPath string) (*server.Engine, *config.Config, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	for _, w := range cfg.Warnings() {
+		fmt.Fprintln(os.Stderr, "warning:", w)
+	}
 	store, err := state.NewFileStore(cfg.StateDir)
 	if err != nil {
 		return nil, nil, err
 	}
-	return server.NewEngine(cfg, store), cfg, nil
+	eng := server.NewEngine(cfg, store)
+	eng.ConfigPath = configPath
+	return eng, cfg, nil
 }
 
 // askOnce submits a task, tails its events to stderr, and prints the final

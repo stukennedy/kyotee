@@ -12,35 +12,92 @@ import (
 
 	"github.com/stukennedy/kyotee/internal/config"
 	"github.com/stukennedy/kyotee/internal/events"
+	"github.com/stukennedy/kyotee/internal/receptionist"
 	"github.com/stukennedy/kyotee/internal/state"
 )
 
 func mockConfig() *config.Config {
 	c := &config.Config{
+		Version: 1,
 		Providers: []config.Provider{
-			{Name: "cheap", Kind: "mock", Vendor: "anthropic"},
-			{Name: "mid", Kind: "mock", Vendor: "anthropic"},
+			{Name: "cheap", Vendor: "mock"},
+			{Name: "mid", Vendor: "mock"},
 		},
-		Models: config.ModelRoles{Receptionist: "cheap", Default: "mid"},
-		Routes: []config.Route{
-			{Strategy: "solo", Thinking: "fast", Models: config.Models{Primary: "mid"}},
+		Receptionist: config.Receptionist{
+			Model: "cheap",
+			Routes: []config.Route{
+				{Strategy: "solo", Thinking: "fast", Models: config.Models{Primary: "mid"}},
+			},
 		},
 	}
-	c.Defaults()
+	c.ApplyDefaults()
 	return c
 }
 
-func newTestEngine(t *testing.T) *Engine {
+func newTestEngine(t *testing.T, dir string) *Engine {
 	t.Helper()
-	store, err := state.NewFileStore(t.TempDir())
+	store, err := state.NewFileStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return NewEngine(mockConfig(), store)
 }
 
-func TestSubmitAndStreamToCompletion(t *testing.T) {
-	e := newTestEngine(t)
+func waitForFinal(t *testing.T, e *Engine, taskID string) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("task did not finish")
+		default:
+		}
+		if st, err := e.Store.Load(taskID); err == nil && st.Final != "" {
+			// Give the async event log a moment to flush the tail.
+			time.Sleep(50 * time.Millisecond)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// readSSE collects events until "event: done" or timeout.
+func readSSE(t *testing.T, url string) (kinds []string, sawDone bool) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("content type %q", ct)
+	}
+	timeout := time.AfterFunc(3*time.Second, func() { resp.Body.Close() })
+	defer timeout.Stop()
+
+	scanner := bufio.NewScanner(resp.Body)
+	current := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			current = strings.TrimPrefix(line, "event: ")
+			if current == "done" {
+				return kinds, true
+			}
+		}
+		if strings.HasPrefix(line, "data: ") && current != "done" {
+			var ev events.Event
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev); err != nil {
+				t.Fatalf("bad event JSON: %v", err)
+			}
+			kinds = append(kinds, ev.Kind)
+		}
+	}
+	return kinds, false
+}
+
+func TestSubmitStreamAndDone(t *testing.T) {
+	e := newTestEngine(t, t.TempDir())
 	srv := httptest.NewServer(e.Handler())
 	defer srv.Close()
 
@@ -56,67 +113,76 @@ func TestSubmitAndStreamToCompletion(t *testing.T) {
 	var created struct {
 		TaskID string `json:"task_id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
-		t.Fatal(err)
-	}
+	json.NewDecoder(resp.Body).Decode(&created)
+	waitForFinal(t, e, created.TaskID)
 
-	// Wait for the pipeline to finish, then connect the SSE stream late —
-	// replay from Seq 0 must reconstruct the full run.
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("task did not finish")
-		default:
-		}
-		if st, err := e.Store.Load(created.TaskID); err == nil && st.Final != "" {
-			goto stream
-		}
-		time.Sleep(20 * time.Millisecond)
+	// Late connect: full replay from Seq 0, terminated by event: done.
+	kinds, sawDone := readSSE(t, srv.URL+"/v1/tasks/"+created.TaskID+"/events")
+	if !sawDone {
+		t.Fatal("stream did not send event: done")
 	}
-
-stream:
-	sseResp, err := http.Get(srv.URL + "/v1/tasks/" + created.TaskID + "/events")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sseResp.Body.Close()
-	if ct := sseResp.Header.Get("Content-Type"); ct != "text/event-stream" {
-		t.Fatalf("content type %q", ct)
-	}
-
 	seen := map[string]bool{}
-	scanner := bufio.NewScanner(sseResp.Body)
-	timeout := time.AfterFunc(3*time.Second, func() { sseResp.Body.Close() })
-	defer timeout.Stop()
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		var ev events.Event
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev); err != nil {
-			t.Fatalf("bad event JSON: %v", err)
-		}
-		seen[ev.Kind] = true
-		if ev.Kind == events.KindTaskFinal {
-			break
-		}
+	for _, k := range kinds {
+		seen[k] = true
 	}
 	for _, k := range []string{events.KindTaskReceived, events.KindTaskClassified,
 		events.KindTaskRouted, events.KindStageStart, events.KindStageEnd, events.KindTaskFinal} {
 		if !seen[k] {
-			t.Fatalf("replayed stream missing %s (saw %v)", k, seen)
+			t.Fatalf("replayed stream missing %s (saw %v)", k, kinds)
 		}
 	}
 }
 
-func TestConfigHotReloadAndRejection(t *testing.T) {
-	e := newTestEngine(t)
+// Replay must survive an engine restart via the persisted event log.
+func TestReplayAcrossEngineRestart(t *testing.T) {
+	dir := t.TempDir()
+	e1 := newTestEngine(t, dir)
+	taskID, err := e1.Submit("persist me", receptionist.Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForFinal(t, e1, taskID)
+
+	// New engine, same state dir — in-memory bus is empty.
+	e2 := newTestEngine(t, dir)
+	srv := httptest.NewServer(e2.Handler())
+	defer srv.Close()
+
+	kinds, sawDone := readSSE(t, srv.URL+"/v1/tasks/"+taskID+"/events")
+	if !sawDone {
+		t.Fatal("post-restart stream did not terminate with done")
+	}
+	if len(kinds) == 0 || kinds[len(kinds)-1] != events.KindTaskFinal {
+		t.Fatalf("post-restart replay incomplete: %v", kinds)
+	}
+}
+
+func TestInvalidOverrideReturns400(t *testing.T) {
+	e := newTestEngine(t, t.TempDir())
 	srv := httptest.NewServer(e.Handler())
 	defer srv.Close()
 
-	// GET returns YAML including our provider.
+	body := `{"text": "task", "overrides": {"strategy": "galactic_senate"}}`
+	resp, err := http.Post(srv.URL+"/v1/tasks", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid override: got %d, want 400", resp.StatusCode)
+	}
+	// Task must not have started.
+	tasks, _ := e.Tasks()
+	if len(tasks) != 0 {
+		t.Fatalf("task started despite invalid override: %+v", tasks)
+	}
+}
+
+func TestConfigHotReloadAndRejection(t *testing.T) {
+	e := newTestEngine(t, t.TempDir())
+	srv := httptest.NewServer(e.Handler())
+	defer srv.Close()
+
 	resp, err := http.Get(srv.URL + "/v1/config")
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +194,6 @@ func TestConfigHotReloadAndRejection(t *testing.T) {
 		t.Fatal("config GET missing provider names")
 	}
 
-	// Invalid PUT → 400, old config stays live.
 	put := func(body string) int {
 		req, _ := http.NewRequest(http.MethodPut, srv.URL+"/v1/config", strings.NewReader(body))
 		r, err := http.DefaultClient.Do(req)
@@ -138,35 +203,63 @@ func TestConfigHotReloadAndRejection(t *testing.T) {
 		defer r.Body.Close()
 		return r.StatusCode
 	}
-	if code := put("routes:\n  - strategy: bogus\n"); code != http.StatusBadRequest {
+	if code := put("version: 1\nreceptionist:\n  routes:\n    - strategy: bogus\n"); code != http.StatusBadRequest {
 		t.Fatalf("invalid config accepted: %d", code)
 	}
-	if e.Holder.Get().Models.Receptionist != "cheap" {
+	if e.Holder.Get().Receptionist.Model != "cheap" {
 		t.Fatal("old config was clobbered by invalid PUT")
 	}
 
-	// Valid PUT hot-swaps.
 	valid := `
+version: 1
 providers:
-  - {name: newmodel, kind: mock}
-models: {receptionist: newmodel, default: newmodel}
-routes:
-  - {strategy: solo, thinking: fast, models: {primary: newmodel}}
+  - {name: newmodel, vendor: mock}
+receptionist:
+  model: newmodel
+  routes:
+    - {strategy: solo, thinking: fast, models: {primary: newmodel}}
 `
 	if code := put(valid); code != http.StatusOK {
 		t.Fatalf("valid config rejected: %d", code)
 	}
-	if e.Holder.Get().Models.Receptionist != "newmodel" {
+	if e.Holder.Get().Receptionist.Model != "newmodel" {
 		t.Fatal("config did not hot-reload")
 	}
 }
 
-func TestResumeEndpoint(t *testing.T) {
-	e := newTestEngine(t)
+func TestProvidersAndHealthz(t *testing.T) {
+	e := newTestEngine(t, t.TempDir())
 	srv := httptest.NewServer(e.Handler())
 	defer srv.Close()
 
-	// Unknown task → 400.
+	resp, err := http.Get(srv.URL + "/v1/providers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var provs []ProviderInfo
+	if err := json.NewDecoder(resp.Body).Decode(&provs); err != nil {
+		t.Fatal(err)
+	}
+	if len(provs) != 2 {
+		t.Fatalf("want 2 providers, got %+v", provs)
+	}
+
+	hz, err := http.Get(srv.URL + "/v1/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hz.Body.Close()
+	if hz.StatusCode != http.StatusOK {
+		t.Fatalf("healthz %d", hz.StatusCode)
+	}
+}
+
+func TestResumeEndpoint(t *testing.T) {
+	e := newTestEngine(t, t.TempDir())
+	srv := httptest.NewServer(e.Handler())
+	defer srv.Close()
+
 	resp, err := http.Post(srv.URL+"/v1/tasks/nope/resume", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)

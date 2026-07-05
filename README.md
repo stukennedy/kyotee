@@ -94,40 +94,51 @@ OpenAI-compatible endpoint — OpenAI, Gemini, local), model roles, strategy
 tuning, and the routing table:
 
 ```yaml
-routes:
-  - when: {complexity: trivial}
-    strategy: solo
-    thinking: fast
-    models: {primary: claude-haiku}
-    max_cost_usd: 0.10
-  - when: {domain: code, complexity: hard}
-    strategy: twobrain
-    thinking: slow
-    models: {primary: claude-opus, divergent: gpt, convergent: claude-sonnet}
-  - when: {domain: reasoning, complexity: hard}
-    strategy: council
-    thinking: slow
-    models: {primary: claude-opus, council: [claude-sonnet, gpt, gemini]}
-  - strategy: solo        # default
-    thinking: auto
-    models: {primary: claude-sonnet}
+version: 1
+receptionist:
+  model: claude-haiku-4-5
+  routes:
+    - when: {complexity: trivial}
+      strategy: solo
+      thinking: fast
+      models: {primary: claude-haiku-4-5}
+      budget_usd: 0.05
+    - when: {domain: code, complexity: hard}
+      strategy: twobrain
+      thinking: slow
+      models: {primary: claude-opus-4-8, divergent: claude-sonnet-5, convergent: claude-sonnet-5}
+      budget_usd: 1.50
+    - when: {domain: reasoning, complexity: hard}
+      strategy: council
+      thinking: slow
+      models: {primary: claude-opus-4-8, council: [claude-opus-4-8, gpt-5, gemini-3-pro]}
+      budget_usd: 3.00
+    - strategy: solo        # default catch-all
+      thinking: auto
+      models: {primary: claude-sonnet-5}
 ```
 
 Rules match top-to-bottom, first match wins; `tool_need: required` from the
-classifier forces slow mode regardless. `PUT /v1/config` (or `c` in the TUI)
+classifier forces slow mode regardless. `kyotee config validate <file>`
+pre-flights the full validation table. `PUT /v1/config` (or `c` in the TUI)
 hot-reloads; invalid config is rejected with a 400 and the old config stays
-live.
+live. Two-brain persona prompts are external files (`twobrain.prompts`), and
+the divergent/convergent temperature split (`div_temp`/`conv_temp`) is the
+mechanism that produces the behavioural split.
 
 ## HTTP API
 
 | Method & path | Purpose |
 |---|---|
-| `POST /v1/tasks` | submit `{text, overrides?}` → `{task_id}` |
+| `POST /v1/tasks` | submit `{text, overrides?}` → `{task_id}`; invalid override → 400 |
 | `GET /v1/tasks` | list persisted tasks |
 | `GET /v1/tasks/{id}` | full persisted state (transcript, cost, checkpoints) |
-| `GET /v1/tasks/{id}/events` | SSE stream, full replay from seq 0, `id:` = seq |
+| `GET /v1/tasks/{id}/events` | SSE: replay from seq 0 (survives engine restarts), live tail, `event: done` terminator |
 | `POST /v1/tasks/{id}/resume` | re-run remaining stages from checkpoints |
 | `GET /v1/config` / `PUT /v1/config` | effective YAML / validated hot reload |
+| `POST /v1/config/reload` | re-read the config file from disk |
+| `GET /v1/providers` | registered models + capabilities + cost |
+| `GET /v1/healthz` | liveness |
 
 ## Development
 

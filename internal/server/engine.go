@@ -1,6 +1,7 @@
-// Package server exposes the engine over HTTP + SSE (inferred spec 02 §HTTP
-// surface): task submission with overrides, event streaming with full replay,
-// resume, and hot-reloadable config. The TUI (spec 08) is a pure client.
+// Package server exposes the engine over HTTP + SSE (spec 02 §3): task
+// submission with validated overrides, event streaming with full replay,
+// resume, provider listing, and hot-reloadable config. The TUI and the
+// Skill shim are pure clients of this surface.
 package server
 
 import (
@@ -24,9 +25,12 @@ import (
 // Engine owns the long-lived pieces (bus, store, config holder, registry)
 // and runs each task's receptionist→executor flow in a goroutine.
 type Engine struct {
-	Holder *config.Holder
-	Bus    *events.MemBus
-	Store  *state.FileStore
+	Holder     *config.Holder
+	Bus        *events.MemBus
+	Store      *state.FileStore
+	ConfigPath string // source file for POST /v1/config/reload ("" = defaults)
+
+	elog *eventLog
 
 	mu       sync.Mutex
 	registry provider.Registry
@@ -40,9 +44,13 @@ func NewEngine(cfg *config.Config, store *state.FileStore) *Engine {
 		Holder:  config.NewHolder(cfg),
 		Bus:     events.NewBus(),
 		Store:   store,
+		elog:    newEventLog(store.Dir),
 		running: map[string]bool{},
 	}
 	e.rebuild(cfg)
+	// Persist every event to the per-task ndjson log (spec 02 §3): replay
+	// survives engine restarts.
+	go e.elog.follow(e.Bus)
 	return e
 }
 
@@ -56,13 +64,25 @@ func (e *Engine) rebuild(cfg *config.Config) {
 	} else {
 		e.embedder = nil
 	}
-	e.tools = thinking.NewToolRegistry(&thinking.WebSearch{})
+	e.tools = config.BuildTools(cfg)
 }
 
-// ReloadConfig validates and applies new config; invalid YAML never takes
-// effect and the old config stays live.
+// ReloadConfig validates and applies new config; invalid config never takes
+// effect and the old config stays live. In-flight tasks keep the snapshot
+// they captured at intake.
 func (e *Engine) ReloadConfig(raw []byte) error {
 	cfg, err := config.Parse(raw)
+	if err != nil {
+		return err
+	}
+	e.Holder.Set(cfg)
+	e.rebuild(cfg)
+	return nil
+}
+
+// ReloadConfigFromDisk re-reads the config file (POST /v1/config/reload).
+func (e *Engine) ReloadConfigFromDisk() error {
+	cfg, err := config.Load(e.ConfigPath)
 	if err != nil {
 		return err
 	}
@@ -82,11 +102,15 @@ func (e *Engine) receptionist() *receptionist.Receptionist {
 	}
 }
 
-// Submit creates a task, kicks off its pipeline in the background, and
-// returns the task ID immediately.
+// Submit validates the override, creates a task, kicks off its pipeline in
+// the background, and returns the task ID. An invalid override rejects the
+// task before it starts (spec 07 §4).
 func (e *Engine) Submit(text string, ov receptionist.Overrides) (string, error) {
 	if text == "" {
 		return "", fmt.Errorf("empty task text")
+	}
+	if err := ov.Validate(e.Holder.Get()); err != nil {
+		return "", err
 	}
 	taskID := newTaskID()
 	st := pipeline.NewState(taskID, text)
@@ -116,8 +140,19 @@ func (e *Engine) Resume(taskID string) error {
 		e.mu.Unlock()
 		return fmt.Errorf("load task %s: %w", taskID, err)
 	}
+	// After an engine restart the bus starts at Seq 0; continue numbering
+	// after the persisted event log so replay + live never collide.
+	if persisted := e.elog.read(taskID); len(persisted) > 0 {
+		e.Bus.SeedSeq(taskID, persisted[len(persisted)-1].Seq+1)
+	}
 	go e.run(st, receptionist.Overrides{})
 	return nil
+}
+
+func (e *Engine) Running(taskID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.running[taskID]
 }
 
 func (e *Engine) run(st *pipeline.State, ov receptionist.Overrides) {
@@ -137,7 +172,7 @@ func (e *Engine) run(st *pipeline.State, ov receptionist.Overrides) {
 	stages, err := e.receptionist().Intake(ctx, st, ov, emit)
 	if err != nil {
 		emit(events.Event{Kind: events.KindError,
-			Payload: map[string]any{"message": "intake failed: " + err.Error()}})
+			Payload: map[string]any{"message": "intake failed: " + err.Error(), "terminal": true}})
 		_ = e.Store.Save(st)
 		return
 	}
@@ -182,6 +217,35 @@ func (e *Engine) Tasks() ([]TaskInfo, error) {
 		})
 	}
 	return out, nil
+}
+
+// ProviderInfo is the /v1/providers row (spec 02 §3).
+type ProviderInfo struct {
+	Name        string  `json:"name"`
+	Vendor      string  `json:"vendor"`
+	Tools       bool    `json:"tools"`
+	Reasoning   bool    `json:"reasoning"`
+	MaxContext  int     `json:"max_context"`
+	InputPer1M  float64 `json:"input_usd_per_1m"`
+	OutputPer1M float64 `json:"output_usd_per_1m"`
+}
+
+func (e *Engine) Providers() []ProviderInfo {
+	e.mu.Lock()
+	reg := e.registry
+	e.mu.Unlock()
+
+	var out []ProviderInfo
+	for _, p := range reg.List() {
+		caps := p.Capabilities()
+		in, outUSD := p.CostPer1M()
+		out = append(out, ProviderInfo{
+			Name: p.Name(), Vendor: p.Vendor(),
+			Tools: caps.Tools, Reasoning: caps.Reasoning, MaxContext: caps.MaxContext,
+			InputPer1M: in, OutputPer1M: outUSD,
+		})
+	}
+	return out
 }
 
 func newTaskID() string {

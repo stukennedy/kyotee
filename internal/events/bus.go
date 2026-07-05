@@ -88,6 +88,17 @@ func (b *MemBus) Subscribe(taskID string) (<-chan Event, func()) {
 	return s.ch, cancel
 }
 
+// SeedSeq advances a task's next sequence number (never backwards). Used
+// when resuming a task after an engine restart so new events continue after
+// the persisted event log instead of colliding at Seq 0.
+func (b *MemBus) SeedSeq(taskID string, next int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.seq[taskID] < next {
+		b.seq[taskID] = next
+	}
+}
+
 func (b *MemBus) History(taskID string) []Event {
 	b.mu.Lock()
 	defer b.mu.Unlock()

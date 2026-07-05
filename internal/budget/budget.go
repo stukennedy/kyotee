@@ -9,19 +9,24 @@ import (
 	"github.com/stukennedy/kyotee/internal/provider"
 )
 
-// WarnThresholds are the fractions of the ceiling at which budget.warn fires.
-var WarnThresholds = []float64{0.50, 0.80, 0.95}
+// DefaultWarnThresholds are the fractions of the ceiling at which
+// budget.warn fires when config doesn't override them.
+var DefaultWarnThresholds = []float64{0.50, 0.80, 0.95}
 
-// CheckWarn emits budget.warn once per crossed threshold. Fired thresholds
-// are recorded in the state's BudgetState so they survive resume. Stages
-// call this after accounting each provider call; the Executor also calls it
-// between stages.
+// CheckWarn emits budget.warn once per crossed threshold (from the state's
+// configured WarnAt, else the defaults). Fired thresholds are recorded in
+// BudgetState so they survive resume. Stages call this after accounting each
+// provider call; the Executor also calls it between stages.
 func CheckWarn(b *pipeline.BudgetState, emit events.Emitter) {
 	if b.LimitUSD <= 0 {
 		return
 	}
+	thresholds := b.WarnAt
+	if len(thresholds) == 0 {
+		thresholds = DefaultWarnThresholds
+	}
 	pct := b.SpentUSD / b.LimitUSD
-	for _, th := range WarnThresholds {
+	for _, th := range thresholds {
 		if pct < th {
 			continue
 		}

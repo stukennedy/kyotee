@@ -17,8 +17,8 @@ func Run(ctx context.Context, baseURL string) error {
 	}
 
 	client := NewClient(baseURL)
-	a := &app.App{
-		Init:   func() interface{} { return NewModel(client) },
+	a := &app.App[*Model]{
+		Init:   func() *Model { return NewModel(client) },
 		Update: Update,
 		View:   View,
 	}

@@ -1,20 +1,22 @@
 # Harness Specs
 
-Numbered specs for the Kyotee multi-model harness. Provided in this set:
+Numbered specs for the Kyotee multi-model harness. Read `00-overview.md`
+first; `10-build-sequence.md` is the dependency-ordered build plan.
 
-- `01-engine-core.md` — Provider/Stage/Event contracts, executor, state store
-- `03-receptionist.md` — classifier, routing rules, budget, handoff envelope
-- `04-thinking-modes.md` — fast/slow gate, tool-need pre-pass
-- `06-council.md` — multi-model consensus, synthesis
-- `08-tui.md` — Tooey front-end
+Provided: 00, 01, 02, 03, 04, 05, 06, 07, 08, 10.
 
-Referenced but not yet provided (implementations are inferred from
-cross-references and marked as such in package docs):
+Still missing: **09 — Skill adapter** (the `SKILL.md` + thin CLI shim so
+Claude Code can invoke Harness patterns mid-session). The engine surface it
+needs (`ask`/`resume`/`status`/`providers` over HTTP) is already in place;
+implement `skill/SKILL.md` + shim once the spec lands.
 
-- **02** — vendor adapters + HTTP/SSE surface → `internal/provider`
-  (anthropic.go, openai.go), `internal/server`
-- **05** — two-brain divergent/convergent strategy → `internal/twobrain`
-- **07** — config schema & per-task overrides → `internal/config`,
-  `receptionist.Overrides`
+Kyotee-specific adaptations from the specs (deliberate, small):
 
-When the missing specs land, reconcile those packages against them.
+- Single `kyotee` binary instead of `harnessd` + `harness-cli`
+  (`kyotee serve` = harnessd; `kyotee ask/config validate` = the CLI).
+- State and config live under `~/.kyotee/` rather than `~/.harness/`.
+- `google`/`local` vendors ride the OpenAI-compatible adapter (Gemini via
+  Google's compat endpoint) instead of bespoke adapters — same contract,
+  fewer moving parts. Anthropic has its own Messages-API adapter.
+- `council.members` is a config-level default member list, used when a route
+  (or an override escalating to council) doesn't name its own.

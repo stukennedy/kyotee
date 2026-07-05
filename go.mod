@@ -6,7 +6,7 @@ toolchain go1.24.12
 
 require (
 	github.com/spf13/cobra v1.10.2
-	github.com/stukennedy/tooey v0.4.1
+	github.com/stukennedy/tooey v0.5.0
 	golang.org/x/term v0.39.0
 	gopkg.in/yaml.v3 v3.0.1
 )

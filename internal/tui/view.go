@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/stukennedy/tooey/component"
 	"github.com/stukennedy/tooey/node"
 )
 
@@ -17,20 +18,25 @@ const (
 	cDim     = 245
 	cDiverge = 213 // pink — divergent brain
 	cConv    = 117 // cyan — convergent brain
+	cModalBG = 236 // modal backdrop
 )
 
-func View(mi interface{}, focused string) node.Node {
-	m := mi.(*Model)
-
+// View renders the model. Modals are Tooey v0.5 overlays with focus scopes:
+// they paint on top of the live main UI and trap Escape as DismissMsg.
+func View(m *Model, focused string) node.Node {
+	main := m.viewMain()
 	switch m.Active {
 	case overlayConfig:
-		return m.viewConfig()
+		return node.Overlay(main, node.Centered(m.viewConfig()))
 	case overlayResume:
-		return m.viewResume()
+		return node.Overlay(main, node.Centered(m.viewResume()))
 	case overlayOverride:
-		return m.viewOverride()
+		return node.Overlay(main, node.Centered(m.viewOverride()))
 	}
+	return main
+}
 
+func (m *Model) viewMain() node.Node {
 	return node.Column(
 		m.viewHeader(),
 		node.Row(
@@ -63,7 +69,8 @@ func (m *Model) viewHeader() node.Node {
 	)
 }
 
-// costMeter is always visible and colour-shifts at 50/80/95% (spec 08 §3).
+// costMeter is always visible and colour-shifts at the warn thresholds
+// (spec 08 §3). Uses the v0.5 Progress component for the bar.
 func (m *Model) costMeter() node.Node {
 	if m.LimitUSD <= 0 {
 		return node.TextStyled(" cost: $0.00 ", cDim, 0, 0)
@@ -78,12 +85,11 @@ func (m *Model) costMeter() node.Node {
 	case pct >= 0.50:
 		color = cWarn
 	}
-	filled := int(pct*8 + 0.5)
-	if filled > 8 {
-		filled = 8
-	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", 8-filled)
-	return node.TextStyled(fmt.Sprintf(" cost: $%.2f / $%.2f [%s] ", m.SpentUSD, m.LimitUSD, bar), color, 0, node.Bold)
+	return node.Row(
+		node.TextStyled(fmt.Sprintf(" cost: $%.2f / $%.2f ", m.SpentUSD, m.LimitUSD), color, 0, node.Bold),
+		component.Progress(pct, 10, color, 0),
+		node.Text(" "),
+	)
 }
 
 func (m *Model) viewRouting() node.Node {
@@ -95,8 +101,8 @@ func (m *Model) viewRouting() node.Node {
 		class = fmt.Sprintf("%s / %s / tools:%s", domain, complexity, toolNeed)
 	}
 	ov := ""
-	if m.Override.Strategy != "" || m.Override.Thinking != "" || m.Override.MaxCostUSD > 0 {
-		ov = fmt.Sprintf("override→ %s %s $%.0f", m.Override.Strategy, m.Override.Thinking, m.Override.MaxCostUSD)
+	if m.Override.Strategy != "" || m.Override.Thinking != "" || m.Override.BudgetUSD > 0 {
+		ov = fmt.Sprintf("override→ %s %s $%.0f", m.Override.Strategy, m.Override.Thinking, m.Override.BudgetUSD)
 	}
 	return node.Column(
 		node.TextStyled(" Routing ", cAccent, 0, node.Bold),
@@ -229,20 +235,31 @@ func (m *Model) viewFooter() node.Node {
 	)
 }
 
+// modal wraps overlay content in a backdrop box with a focus scope, so
+// Escape arrives as DismissMsg and Tab stays inside while it is open.
+func modal(key string, w, h int, content node.Node) node.Node {
+	return node.Box(node.BorderRounded, content).
+		WithSize(w, h).
+		WithBG(cModalBG).
+		WithKey(key).
+		WithFocusScope()
+}
+
 func (m *Model) viewConfig() node.Node {
-	return node.Column(
-		node.TextStyled(" Config (Enter: save & hot-reload · Shift+Enter: newline · Esc: cancel) ", cAccent, 0, node.Bold),
-		node.Box(node.BorderRounded, node.Column(m.ConfigInput.Render("", 0, 0, 100)).WithScrollToBottom()).WithFlex(1),
-		node.TextStyled(" "+m.Status+" ", cWarn, 0, 0),
-	)
+	return modal("modal-config", 106, 34, node.Column(
+		node.TextStyled(" Config — Enter: save & hot-reload · Shift+Enter: newline · Esc: cancel ", cAccent, cModalBG, node.Bold),
+		node.Column(m.ConfigInput.Render("", 0, cModalBG, 100)).WithFlex(1).WithScrollToBottom(),
+		node.TextStyled(" "+m.Status+" ", cWarn, cModalBG, 0),
+	))
 }
 
 func (m *Model) viewResume() node.Node {
 	lines := []node.Node{
-		node.TextStyled(" Resume a task (↑/↓ · Enter: resume · Esc: cancel) ", cAccent, 0, node.Bold),
+		node.TextStyled(" Resume a task — ↑/↓ · Enter: resume · Esc: cancel ", cAccent, cModalBG, node.Bold),
+		node.Text(""),
 	}
 	if len(m.Tasks) == 0 {
-		lines = append(lines, node.TextStyled(" no persisted tasks ", cDim, 0, 0))
+		lines = append(lines, node.TextStyled(" no persisted tasks ", cDim, cModalBG, 0))
 	}
 	for i, t := range m.Tasks {
 		status := "final"
@@ -251,39 +268,38 @@ func (m *Model) viewResume() node.Node {
 		} else if t.Final == "" {
 			status = "incomplete"
 		}
-		line := fmt.Sprintf(" %s  $%.2f  %-10s  %s", t.TaskID, t.SpentUSD, status, truncate(t.Original, 60))
+		line := fmt.Sprintf(" %s  $%.2f  %-10s  %s", t.TaskID, t.SpentUSD, status, truncate(t.Original, 46))
 		if i == m.TaskSel {
-			lines = append(lines, node.TextStyled("> "+line, cAccent, 0, node.Bold))
+			lines = append(lines, node.TextStyled("> "+line, cAccent, cModalBG, node.Bold))
 		} else {
-			lines = append(lines, node.Text("  "+line))
+			lines = append(lines, node.TextStyled("  "+line, 0, cModalBG, 0))
 		}
 	}
-	lines = append(lines, node.Spacer(), node.TextStyled(" "+m.Status+" ", cWarn, 0, 0))
-	return node.Column(lines...)
+	lines = append(lines, node.Spacer(), node.TextStyled(" "+m.Status+" ", cWarn, cModalBG, 0))
+	return modal("modal-resume", 100, 20, node.Column(lines...))
 }
 
 func (m *Model) viewOverride() node.Node {
-	f := func(label, val string) node.Node {
-		if val == "" {
-			val = "(routed)"
+	val := func(v string) string {
+		if v == "" {
+			return "(routed)"
 		}
-		return node.Text(fmt.Sprintf("  %s: %s", label, val))
+		return v
 	}
 	budget := "(routed)"
-	if m.Override.MaxCostUSD > 0 {
-		budget = fmt.Sprintf("$%.0f", m.Override.MaxCostUSD)
+	if m.Override.BudgetUSD > 0 {
+		budget = fmt.Sprintf("$%.0f", m.Override.BudgetUSD)
 	}
-	return node.Column(
-		node.TextStyled(" Override & escalate — applies to the NEXT task ", cAccent, 0, node.Bold),
+	return modal("modal-override", 64, 12, node.Column(
+		node.TextStyled(" Override & escalate — applies to the NEXT task ", cAccent, cModalBG, node.Bold),
 		node.Text(""),
-		f("s → strategy   ", m.Override.Strategy),
-		f("t → thinking   ", m.Override.Thinking),
-		node.Text("  +/- → budget   : "+budget),
-		node.Text("  x → clear all overrides"),
+		node.TextStyled("  s → strategy   : "+val(m.Override.Strategy), 0, cModalBG, 0),
+		node.TextStyled("  t → thinking   : "+val(m.Override.Thinking), 0, cModalBG, 0),
+		node.TextStyled("  +/- → budget   : "+budget, 0, cModalBG, 0),
+		node.TextStyled("  x → clear all overrides", 0, cModalBG, 0),
 		node.Text(""),
-		node.TextStyled(" Enter/Esc: back ", cDim, 0, 0),
-		node.Spacer(),
-	)
+		node.TextStyled(" Enter/Esc: back ", cDim, cModalBG, 0),
+	))
 }
 
 func orDash(s string) string {

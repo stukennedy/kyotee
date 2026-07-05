@@ -25,13 +25,14 @@ kyotee ask "prompt" [--strategy council] [--thinking slow] [--budget 5]
 ```
 
 Provider API keys come from env vars named in the config (`ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, `GEMINI_API_KEY` by default). `kind: mock` providers run
+`OPENAI_API_KEY`, `GOOGLE_API_KEY` by default). `vendor: mock` providers run
 without keys (used by all tests).
 
 ## Architecture
 
-Specs live in `docs/specs/` (01, 03, 04, 06, 08 provided; 02, 05, 07 inferred
-— see docs/specs/README.md). Dependency order:
+Specs live in `docs/specs/` (00–08 and 10 provided; 09 skill-adapter still
+pending — see docs/specs/README.md for Kyotee-specific adaptations).
+Dependency order:
 
 - `internal/provider` — vendor-agnostic `Provider` interface, registry,
   Anthropic + OpenAI-compatible adapters, scriptable `Fake` for tests.
@@ -41,18 +42,23 @@ Specs live in `docs/specs/` (01, 03, 04, 06, 08 provided; 02, 05, 07 inferred
   (checkpoints after every stage, halts on budget, promotes Draft→Final).
 - `internal/state` — atomic JSON file store, `~/.kyotee/tasks/`.
 - `internal/budget` — 50/80/95% warns + worst-case preflight estimates.
-- `internal/config` — YAML config, routing rules, hot-reloadable `Holder`.
+- `internal/config` — spec-07 YAML schema (version 1), full validation
+  table, hot-reloadable `Holder`, registry/tools/embedder builders.
 - `internal/receptionist` — classify (cheap model, strict JSON, safe
   fallback) → first-match-wins route → preflight downgrade → assemble stages.
 - `internal/thinking` — fast/slow auto gate, tool-need pre-pass, tool
   registry (`web_search`), shared tool-use loop, Solo stage.
-- `internal/twobrain` — divergent/convergent rounds + referee synthesis.
+- `internal/twobrain` — divergent/convergent rounds (temperature split is
+  the mechanism: div ~1.0, conv ~0.3), external persona prompt files,
+  referee synthesis.
 - `internal/council` — parallel openings, rebuttal rounds, consensus via
   vote/similarity/judge, deadlock handling, Synthesis stage.
 - `internal/server` — engine lifecycle + HTTP/SSE surface (`/v1/tasks`,
-  `/v1/tasks/{id}/events`, `/v1/config`).
-- `internal/tui` — Tooey Elm-style front-end; pure SSE consumer + HTTP
-  action poster, no orchestration logic.
+  `/v1/tasks/{id}/events` with `event: done` + ndjson replay across
+  restarts, `/v1/config[/reload]`, `/v1/providers`, `/v1/healthz`).
+- `internal/tui` — Tooey (v0.5, generic Elm API) front-end; pure SSE
+  consumer + HTTP action poster; modals are Overlay + focus scopes
+  (Escape → DismissMsg); golden-frame tests via tooeytest.
 
 ## Conventions
 

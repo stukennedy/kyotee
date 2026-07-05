@@ -23,17 +23,55 @@ type Route struct {
 	Strategy     string // "solo" | "twobrain" | "council"
 	ThinkingMode string // "fast" | "slow" | "auto"
 	Models       config.Models
-	MaxCostUSD   float64 // per-task ceiling (0 = inherit global default)
+	BudgetUSD    float64 // per-task ceiling (0 = inherit global default)
 }
 
-// Overrides are per-task knobs from the TUI/API (spec 08 §5); zero values
-// mean "no override".
+// Overrides shallow-merge onto the effective config for one task (spec 07
+// §4): the TUI's "escalate this one to council" affordance. Zero values mean
+// "no override".
 type Overrides struct {
-	Strategy        string  `json:"strategy,omitempty"`
-	Thinking        string  `json:"thinking,omitempty"`
-	MaxCostUSD      float64 `json:"max_cost_usd,omitempty"`
-	CouncilRounds   int     `json:"council_rounds,omitempty"`
-	ConsensusMethod string  `json:"consensus_method,omitempty"`
+	Strategy        string        `json:"strategy,omitempty"`
+	Thinking        string        `json:"thinking,omitempty"`
+	Models          config.Models `json:"models,omitempty"`
+	BudgetUSD       float64       `json:"budget_usd,omitempty"`
+	CouncilRounds   int           `json:"council_rounds,omitempty"`
+	ConsensusMethod string        `json:"consensus_method,omitempty"`
+}
+
+// Validate checks an override against the same rules as config (spec 07 §4).
+// Invalid overrides must reject the task before it starts.
+func (ov Overrides) Validate(cfg *config.Config) error {
+	switch ov.Strategy {
+	case "", "solo", "twobrain", "council":
+	default:
+		return fmt.Errorf("override strategy %q not in {solo, twobrain, council}", ov.Strategy)
+	}
+	switch ov.Thinking {
+	case "", "fast", "slow", "auto":
+	default:
+		return fmt.Errorf("override thinking %q not in {fast, slow, auto}", ov.Thinking)
+	}
+	if ov.BudgetUSD < 0 {
+		return fmt.Errorf("override budget_usd must be >= 0")
+	}
+	if ov.CouncilRounds < 0 || ov.CouncilRounds > config.CouncilRoundsHardCap {
+		return fmt.Errorf("override council_rounds must be in [1,%d]", config.CouncilRoundsHardCap)
+	}
+	switch ov.ConsensusMethod {
+	case "", "vote", "similarity", "judge":
+	default:
+		return fmt.Errorf("override consensus_method %q not in {vote, similarity, judge}", ov.ConsensusMethod)
+	}
+	known := map[string]bool{}
+	for _, p := range cfg.Providers {
+		known[p.Name] = true
+	}
+	for _, m := range append([]string{ov.Models.Primary, ov.Models.Divergent, ov.Models.Convergent}, ov.Models.Council...) {
+		if m != "" && !known[m] {
+			return fmt.Errorf("override references unknown provider %q", m)
+		}
+	}
+	return nil
 }
 
 type Receptionist struct {
@@ -48,6 +86,9 @@ type Receptionist struct {
 // are skipped by the Executor via State.Checkpoints.
 func (r *Receptionist) Intake(ctx context.Context, st *pipeline.State, ov Overrides, emit events.Emitter) ([]pipeline.Stage, error) {
 	cfg := r.Cfg.Get()
+	if err := ov.Validate(cfg); err != nil {
+		return nil, err
+	}
 
 	if st.Class.Complexity == "" {
 		st.Class = r.Classify(ctx, st, emit)
@@ -64,20 +105,21 @@ func (r *Receptionist) Intake(ctx context.Context, st *pipeline.State, ov Overri
 	route := MatchRoute(cfg, st.Class)
 	applyOverrides(&route, ov)
 
-	// Budget ceiling: per-route override, else global default. Never lower an
+	// Budget ceiling: override > route > global default. Never lower an
 	// already-set limit on resume.
 	if st.Budget.LimitUSD == 0 {
-		limit := route.MaxCostUSD
+		limit := route.BudgetUSD
 		if limit == 0 {
-			limit = cfg.Budget.DefaultLimitUSD
+			limit = cfg.BudgetDefaultUSD()
 		}
 		st.Budget.LimitUSD = limit
 	}
-	if ov.MaxCostUSD > 0 {
-		st.Budget.LimitUSD = ov.MaxCostUSD
+	if ov.BudgetUSD > 0 {
+		st.Budget.LimitUSD = ov.BudgetUSD
 	}
+	st.Budget.WarnAt = cfg.Receptionist.WarnThresholds
 
-	route = r.preflight(route, st, cfg, emit)
+	route = r.preflight(route, st, cfg, ov, emit)
 
 	stages, stageIDs, modelNames, err := r.assemble(route, cfg, ov)
 	if err != nil {
@@ -96,10 +138,10 @@ func (r *Receptionist) Intake(ctx context.Context, st *pipeline.State, ov Overri
 	return stages, nil
 }
 
-// MatchRoute applies config rules top-to-bottom; first match wins. If no
-// rule matches, a safe solo/auto default on the default model is returned.
+// MatchRoute applies routing rules top-to-bottom; first match wins. If no
+// rule matches, a safe solo/auto default on the receptionist model is used.
 func MatchRoute(cfg *config.Config, class pipeline.Classification) Route {
-	for _, rule := range cfg.Routes {
+	for _, rule := range cfg.Receptionist.Routes {
 		if rule.When.Complexity != "" && rule.When.Complexity != class.Complexity {
 			continue
 		}
@@ -113,13 +155,13 @@ func MatchRoute(cfg *config.Config, class pipeline.Classification) Route {
 			Strategy:     rule.Strategy,
 			ThinkingMode: defaultStr(rule.Thinking, "auto"),
 			Models:       rule.Models,
-			MaxCostUSD:   rule.MaxCostUSD,
+			BudgetUSD:    rule.BudgetUSD,
 		}
 	}
 	return Route{
 		Strategy:     "solo",
 		ThinkingMode: "auto",
-		Models:       config.Models{Primary: cfg.Models.Default},
+		Models:       config.Models{Primary: cfg.Receptionist.Model},
 	}
 }
 
@@ -130,12 +172,24 @@ func applyOverrides(route *Route, ov Overrides) {
 	if ov.Thinking != "" {
 		route.ThinkingMode = ov.Thinking
 	}
+	if ov.Models.Primary != "" {
+		route.Models.Primary = ov.Models.Primary
+	}
+	if ov.Models.Divergent != "" {
+		route.Models.Divergent = ov.Models.Divergent
+	}
+	if ov.Models.Convergent != "" {
+		route.Models.Convergent = ov.Models.Convergent
+	}
+	if len(ov.Models.Council) > 0 {
+		route.Models.Council = ov.Models.Council
+	}
 }
 
 // preflight estimates worst-case spend for expensive strategies and
 // downgrades to solo when the ceiling can't cover it (spec 03 §5): better a
 // cheaper answer than a refusal.
-func (r *Receptionist) preflight(route Route, st *pipeline.State, cfg *config.Config, emit events.Emitter) Route {
+func (r *Receptionist) preflight(route Route, st *pipeline.State, cfg *config.Config, ov Overrides, emit events.Emitter) Route {
 	remaining := st.Budget.RemainingUSD()
 	if remaining < 0 { // unlimited
 		return route
@@ -145,12 +199,16 @@ func (r *Receptionist) preflight(route Route, st *pipeline.State, cfg *config.Co
 	switch route.Strategy {
 	case "council":
 		members := r.resolveAll(councilMembers(route, cfg))
-		synth, _ := r.resolve(route.Models.Primary, cfg)
-		estimate = budget.EstimateCouncil(members, cfg.Council.Rounds, synth)
+		synth, _ := r.resolve(route.Models.Primary)
+		rounds := cfg.Council.Rounds
+		if ov.CouncilRounds > 0 {
+			rounds = ov.CouncilRounds
+		}
+		estimate = budget.EstimateCouncil(members, rounds, synth)
 	case "twobrain":
-		div, _ := r.resolve(route.Models.Divergent, cfg)
-		conv, _ := r.resolve(route.Models.Convergent, cfg)
-		ref, _ := r.resolve(route.Models.Primary, cfg)
+		div, _ := r.resolve(defaultStr(route.Models.Divergent, route.Models.Primary))
+		conv, _ := r.resolve(defaultStr(route.Models.Convergent, route.Models.Primary))
+		ref, _ := r.resolve(route.Models.Primary)
 		estimate = budget.EstimateTwoBrain(div, conv, ref, cfg.TwoBrain.Rounds)
 	default:
 		return route
@@ -170,50 +228,60 @@ func (r *Receptionist) preflight(route Route, st *pipeline.State, cfg *config.Co
 		},
 	})
 	route.Strategy = "solo"
-	if route.Models.Primary == "" {
-		route.Models.Primary = cfg.Models.Default
-	}
 	return route
 }
 
 // assemble builds the ordered []Stage for the route (spec 03 §4):
 // Thinking(mode) → solver stage(s) → Output.
 func (r *Receptionist) assemble(route Route, cfg *config.Config, ov Overrides) ([]pipeline.Stage, []string, map[string]any, error) {
-	gate, err := r.resolve(cfg.Models.Receptionist, cfg)
+	gate, err := r.resolve(cfg.Thinking.GateModel)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("receptionist model: %w", err)
+		return nil, nil, nil, fmt.Errorf("thinking gate model: %w", err)
 	}
-	primary, err := r.resolve(route.Models.Primary, cfg)
+	prepass, err := r.resolve(cfg.Thinking.PrepassModel)
+	if err != nil {
+		prepass = gate
+	}
+	primary, err := r.resolve(route.Models.Primary)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("primary model: %w", err)
 	}
 
 	stages := []pipeline.Stage{&thinking.Stage{
-		Mode:  route.ThinkingMode,
-		Gate:  gate,
-		Tools: r.Tools,
+		Mode:    route.ThinkingMode,
+		Gate:    gate,
+		Prepass: prepass,
+		Tools:   r.Tools,
 		Opts: thinking.Options{
-			FastEffort:          cfg.Thinking.FastEffort,
-			SlowEffort:          cfg.Thinking.SlowEffort,
-			ConfidenceThreshold: cfg.Thinking.ConfidenceThreshold,
-			MaxToolCalls:        cfg.Thinking.MaxToolCalls,
+			FastEffort:         cfg.Defaults.ReasoningEffortFast,
+			SlowEffort:         cfg.Defaults.ReasoningEffortSlow,
+			LowConfidenceBelow: cfg.Thinking.LowConfidenceBelow,
+			SlowTriggers:       cfg.Thinking.SlowTriggers,
+			MaxToolCalls:       cfg.Defaults.ToolCallCap,
 		},
 	}}
 	models := map[string]any{"primary": primary.Name()}
 
 	switch route.Strategy {
 	case "twobrain":
-		div, err := r.resolve(defaultStr(route.Models.Divergent, route.Models.Primary), cfg)
+		div, err := r.resolve(defaultStr(route.Models.Divergent, route.Models.Primary))
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		conv, err := r.resolve(defaultStr(route.Models.Convergent, route.Models.Primary), cfg)
+		conv, err := r.resolve(defaultStr(route.Models.Convergent, route.Models.Primary))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		prompts, err := twobrain.LoadPrompts(
+			cfg.TwoBrain.Prompts.Divergent, cfg.TwoBrain.Prompts.Convergent, cfg.TwoBrain.Prompts.Referee)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		stages = append(stages, &twobrain.Stage{
 			Divergent: div, Convergent: conv, Referee: primary,
-			Rounds: cfg.TwoBrain.Rounds, Tools: r.Tools,
+			Rounds:  cfg.TwoBrain.Rounds,
+			DivTemp: cfg.TwoBrain.DivTemp, ConvTemp: cfg.TwoBrain.ConvTemp,
+			Prompts: prompts, Tools: r.Tools,
 		})
 		models["divergent"], models["convergent"] = div.Name(), conv.Name()
 
@@ -247,7 +315,7 @@ func (r *Receptionist) assemble(route Route, cfg *config.Config, ov Overrides) (
 
 	default: // solo
 		stages = append(stages, &thinking.Solo{
-			Model: primary, Tools: r.Tools, MaxToolCalls: cfg.Thinking.MaxToolCalls,
+			Model: primary, Tools: r.Tools, MaxToolCalls: cfg.Defaults.ToolCallCap,
 		})
 	}
 
@@ -259,13 +327,18 @@ func (r *Receptionist) assemble(route Route, cfg *config.Config, ov Overrides) (
 	return stages, ids, models, nil
 }
 
-// resolve maps a model name (falling back to the config default) to a Provider.
-func (r *Receptionist) resolve(name string, cfg *config.Config) (provider.Provider, error) {
-	if name == "" {
-		name = cfg.Models.Default
+// councilMembers falls back to the config-level default member list when the
+// route doesn't declare one (e.g. an override escalated to council).
+func councilMembers(route Route, cfg *config.Config) []string {
+	if len(route.Models.Council) > 0 {
+		return route.Models.Council
 	}
+	return cfg.Council.Members
+}
+
+func (r *Receptionist) resolve(name string) (provider.Provider, error) {
 	if name == "" {
-		return nil, fmt.Errorf("no model name and no models.default configured")
+		return nil, fmt.Errorf("no model name configured")
 	}
 	return r.Registry.Get(name)
 }
@@ -278,15 +351,6 @@ func (r *Receptionist) resolveAll(names []string) []provider.Provider {
 		}
 	}
 	return out
-}
-
-// councilMembers falls back to the config-level default member list when the
-// route doesn't declare one (e.g. an override escalated to council).
-func councilMembers(route Route, cfg *config.Config) []string {
-	if len(route.Models.Council) > 0 {
-		return route.Models.Council
-	}
-	return cfg.Council.Members
 }
 
 func defaultStr(s, def string) string {

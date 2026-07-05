@@ -69,8 +69,9 @@ func (e *Executor) Execute(ctx context.Context, stages []Stage, st *State) (*Sta
 				Kind:  events.KindError,
 				Stage: stage.ID(),
 				Payload: map[string]any{
-					"message": err.Error(),
-					"stage":   stage.ID(),
+					"message":  err.Error(),
+					"stage":    stage.ID(),
+					"terminal": true, // run stops here; resumable from checkpoint
 				},
 			})
 			e.persist(st, emit)

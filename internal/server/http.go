@@ -9,18 +9,22 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/stukennedy/kyotee/internal/events"
 	"github.com/stukennedy/kyotee/internal/receptionist"
 )
 
-// Handler builds the engine's HTTP mux:
+// Handler builds the engine's HTTP mux (spec 02 §3):
 //
-//	POST /v1/tasks                {text, overrides?} → {task_id}
+//	POST /v1/tasks                {text, overrides?} → 201 {task_id}; invalid override → 400
 //	GET  /v1/tasks                → [TaskInfo]
-//	GET  /v1/tasks/{id}           → persisted State
-//	GET  /v1/tasks/{id}/events    → SSE, replay from Seq 0 + live + ": ping"
+//	GET  /v1/tasks/{id}           → persisted State snapshot
+//	GET  /v1/tasks/{id}/events    → SSE: replay from Seq 0, live tail, ": ping", "event: done"
 //	POST /v1/tasks/{id}/resume    → 202
-//	GET  /v1/config               → effective config (YAML)
+//	GET  /v1/config               → effective config (YAML; secrets are env names only)
 //	PUT  /v1/config               → hot-reload; 400 keeps old config live
+//	POST /v1/config/reload        → re-read config file from disk
+//	GET  /v1/providers            → registered models + capabilities + cost
+//	GET  /v1/healthz
 func (e *Engine) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -92,12 +96,43 @@ func (e *Engine) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 	})
 
+	mux.HandleFunc("POST /v1/config/reload", func(w http.ResponseWriter, r *http.Request) {
+		if err := e.ReloadConfigFromDisk(); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
+	})
+
+	mux.HandleFunc("GET /v1/providers", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, e.Providers())
+	})
+
+	mux.HandleFunc("GET /v1/healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
 	return mux
 }
 
-// handleSSE streams a task's events one JSON object per data: line. The bus
-// replays retained history first, so connecting mid- or post-run
-// reconstructs the full state; the `id:` field carries Seq for client de-dup.
+// terminalEvent reports whether an event ends the run (task.final, or an
+// error flagged terminal). Drives the SSE "event: done" frame.
+func terminalEvent(ev events.Event) bool {
+	if ev.Kind == events.KindTaskFinal {
+		return true
+	}
+	if ev.Kind == events.KindError {
+		t, _ := ev.Payload["terminal"].(bool)
+		return t
+	}
+	return false
+}
+
+// handleSSE streams a task's events one JSON object per data: line, in Seq
+// order: persisted-log replay (survives engine restarts) deduplicated
+// against the live bus subscription, then live tail. Sends "event: done"
+// when the task reaches task.final or a terminal error, and ": ping"
+// heartbeats every 15s. The id: field carries Seq for client de-dup.
 func (e *Engine) handleSSE(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	flusher, ok := w.(http.Flusher)
@@ -111,8 +146,41 @@ func (e *Engine) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
+	// Subscribe first (replays in-memory history), then overlay the
+	// persisted log for anything the bus no longer has (engine restart).
 	ch, cancel := e.Bus.Subscribe(taskID)
 	defer cancel()
+
+	sent := make(map[int64]bool)
+	writeEvent := func(ev events.Event) bool {
+		if sent[ev.Seq] {
+			return false
+		}
+		sent[ev.Seq] = true
+		data, err := json.Marshal(ev)
+		if err != nil {
+			return false
+		}
+		fmt.Fprintf(w, "id: %d\nevent: engine\ndata: %s\n\n", ev.Seq, data)
+		return terminalEvent(ev)
+	}
+	done := func() {
+		fmt.Fprint(w, "event: done\ndata: {}\n\n")
+		flusher.Flush()
+	}
+
+	finished := false
+	for _, ev := range e.elog.read(taskID) {
+		if writeEvent(ev) {
+			finished = true
+		}
+	}
+	flusher.Flush()
+	// A finished task with no new run coming: replay is complete, close.
+	if finished && !e.Running(taskID) {
+		done()
+		return
+	}
 
 	ping := time.NewTicker(15 * time.Second)
 	defer ping.Stop()
@@ -128,12 +196,12 @@ func (e *Engine) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			data, err := json.Marshal(ev)
-			if err != nil {
-				continue
-			}
-			fmt.Fprintf(w, "id: %d\nevent: engine\ndata: %s\n\n", ev.Seq, data)
+			isTerminal := writeEvent(ev)
 			flusher.Flush()
+			if isTerminal {
+				done()
+				return
+			}
 		}
 	}
 }

@@ -32,7 +32,7 @@ var fallbackClass = pipeline.Classification{
 // defensively, falling back to a safe default on any failure.
 func (r *Receptionist) Classify(ctx context.Context, st *pipeline.State, emit events.Emitter) pipeline.Classification {
 	cfg := r.Cfg.Get()
-	model, err := r.resolve(cfg.Models.Receptionist, cfg)
+	model, err := r.resolve(cfg.Receptionist.Model)
 	if err != nil {
 		r.classifyWarn(emit, "no receptionist model: "+err.Error())
 		return fallbackClass

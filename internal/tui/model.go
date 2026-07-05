@@ -151,8 +151,7 @@ func (m *Model) reset(taskID string) {
 	m.seen = map[int64]bool{}
 }
 
-func Update(mi interface{}, msg app.Msg) app.UpdateResult {
-	m := mi.(*Model)
+func Update(m *Model, msg app.Msg) app.UpdateResult[*Model] {
 	switch msg := msg.(type) {
 	case app.KeyMsg:
 		return m.handleKey(msg.Key)
@@ -165,6 +164,10 @@ func Update(mi interface{}, msg app.Msg) app.UpdateResult {
 		return app.NoCmd(m)
 	case app.ResizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		return app.NoCmd(m)
+	case app.DismissMsg:
+		// Escape while a modal's focus scope is active (Tooey v0.5).
+		m.Active = overlayNone
 		return app.NoCmd(m)
 
 	case SSEMsg:
@@ -222,10 +225,10 @@ func Update(mi interface{}, msg app.Msg) app.UpdateResult {
 	return app.NoCmd(m)
 }
 
-func (m *Model) handleKey(k input.Key) app.UpdateResult {
+func (m *Model) handleKey(k input.Key) app.UpdateResult[*Model] {
 	if k.Type == input.CtrlC {
 		if m.quitArmed {
-			return app.UpdateResult{Model: nil}
+			return app.Quit(m)
 		}
 		m.quitArmed = true
 		m.Status = "press Ctrl+C again to quit"
@@ -258,7 +261,7 @@ func (m *Model) handleKey(k input.Key) app.UpdateResult {
 		if m.Input.Value == "" {
 			switch k.Rune {
 			case 'q':
-				return app.UpdateResult{Model: nil}
+				return app.Quit(m)
 			case 'c':
 				m.Status = "fetching config…"
 				return app.WithCmd(m, m.Client.FetchConfigCmd())
@@ -275,7 +278,7 @@ func (m *Model) handleKey(k input.Key) app.UpdateResult {
 	return app.NoCmd(m)
 }
 
-func (m *Model) handleConfigKey(k input.Key) app.UpdateResult {
+func (m *Model) handleConfigKey(k input.Key) app.UpdateResult[*Model] {
 	switch k.Type {
 	case input.Escape:
 		m.Active = overlayNone
@@ -288,7 +291,7 @@ func (m *Model) handleConfigKey(k input.Key) app.UpdateResult {
 	return app.NoCmd(m)
 }
 
-func (m *Model) handleResumeKey(k input.Key) app.UpdateResult {
+func (m *Model) handleResumeKey(k input.Key) app.UpdateResult[*Model] {
 	switch k.Type {
 	case input.Escape:
 		m.Active = overlayNone
@@ -312,7 +315,7 @@ func (m *Model) handleResumeKey(k input.Key) app.UpdateResult {
 
 // handleOverrideKey: minimal override & escalate — cycle strategy/thinking,
 // nudge budget; applied to the next submitted task.
-func (m *Model) handleOverrideKey(k input.Key) app.UpdateResult {
+func (m *Model) handleOverrideKey(k input.Key) app.UpdateResult[*Model] {
 	cycle := func(cur string, opts ...string) string {
 		for i, o := range opts {
 			if o == cur {
@@ -331,12 +334,12 @@ func (m *Model) handleOverrideKey(k input.Key) app.UpdateResult {
 		case 't':
 			m.Override.Thinking = cycle(m.Override.Thinking, "", "fast", "slow", "auto")
 		case '+':
-			m.Override.MaxCostUSD += 1
+			m.Override.BudgetUSD += 1
 		case '-':
-			if m.Override.MaxCostUSD >= 1 {
-				m.Override.MaxCostUSD -= 1
+			if m.Override.BudgetUSD >= 1 {
+				m.Override.BudgetUSD -= 1
 			} else {
-				m.Override.MaxCostUSD = 0
+				m.Override.BudgetUSD = 0
 			}
 		case 'x':
 			m.Override = receptionist.Overrides{}

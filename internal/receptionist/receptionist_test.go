@@ -9,32 +9,34 @@ import (
 	"github.com/stukennedy/kyotee/internal/events"
 	"github.com/stukennedy/kyotee/internal/pipeline"
 	"github.com/stukennedy/kyotee/internal/provider"
-	"github.com/stukennedy/kyotee/internal/thinking"
 )
 
 func testConfig() *config.Config {
 	c := &config.Config{
+		Version: 1,
 		Providers: []config.Provider{
-			{Name: "cheap", Kind: "mock", Vendor: "anthropic"},
-			{Name: "mid", Kind: "mock", Vendor: "anthropic"},
-			{Name: "strong", Kind: "mock", Vendor: "anthropic"},
-			{Name: "other", Kind: "mock", Vendor: "openai"},
+			{Name: "cheap", Vendor: "mock"},
+			{Name: "mid", Vendor: "mock"},
+			{Name: "strong", Vendor: "mock"},
+			{Name: "other", Vendor: "mock"},
 		},
-		Models:  config.ModelRoles{Receptionist: "cheap", Default: "mid"},
+		Receptionist: config.Receptionist{
+			Model: "cheap",
+			Routes: []config.Route{
+				{When: config.When{Complexity: "trivial"}, Strategy: "solo", Thinking: "fast",
+					Models: config.Models{Primary: "cheap"}, BudgetUSD: 0.10},
+				{When: config.When{Domain: "code", Complexity: "standard"}, Strategy: "solo", Thinking: "auto",
+					Models: config.Models{Primary: "mid"}},
+				{When: config.When{Domain: "code", Complexity: "hard"}, Strategy: "twobrain", Thinking: "slow",
+					Models: config.Models{Primary: "strong", Divergent: "other", Convergent: "mid"}},
+				{When: config.When{Domain: "reasoning", Complexity: "hard"}, Strategy: "council", Thinking: "slow",
+					Models: config.Models{Primary: "strong", Council: []string{"mid", "other", "strong"}}},
+				{Strategy: "solo", Thinking: "auto", Models: config.Models{Primary: "mid"}},
+			},
+		},
 		Council: config.Council{Members: []string{"mid", "other", "strong"}},
-		Routes: []config.Route{
-			{When: config.When{Complexity: "trivial"}, Strategy: "solo", Thinking: "fast",
-				Models: config.Models{Primary: "cheap"}, MaxCostUSD: 0.10},
-			{When: config.When{Domain: "code", Complexity: "standard"}, Strategy: "solo", Thinking: "auto",
-				Models: config.Models{Primary: "mid"}},
-			{When: config.When{Domain: "code", Complexity: "hard"}, Strategy: "twobrain", Thinking: "slow",
-				Models: config.Models{Primary: "strong", Divergent: "other", Convergent: "mid"}},
-			{When: config.When{Domain: "reasoning", Complexity: "hard"}, Strategy: "council", Thinking: "slow",
-				Models: config.Models{Primary: "strong", Council: []string{"mid", "other", "strong"}}},
-			{Strategy: "solo", Thinking: "auto", Models: config.Models{Primary: "mid"}},
-		},
 	}
-	c.Defaults()
+	c.ApplyDefaults()
 	if err := c.Validate(); err != nil {
 		panic(err)
 	}
@@ -45,7 +47,7 @@ func newReceptionist(c *config.Config) *Receptionist {
 	return &Receptionist{
 		Cfg:      config.NewHolder(c),
 		Registry: config.BuildRegistry(c),
-		Tools:    thinking.NewToolRegistry(),
+		Tools:    config.BuildTools(c),
 	}
 }
 
@@ -100,8 +102,7 @@ func TestPipelineAssemblyPerStrategy(t *testing.T) {
 	for _, tc := range cases {
 		st := pipeline.NewState("t", "task")
 		st.Class = tc.class
-		st.Budget.LimitUSD = 0
-		stages, err := r.Intake(context.Background(), st, Overrides{}, emit)
+		stages, err := r.Intake(context.Background(), st, Overrides{BudgetUSD: 100}, emit)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -121,9 +122,9 @@ func TestPreflightDowngradesCouncilToSolo(t *testing.T) {
 	for i := range cfg.Providers {
 		cfg.Providers[i].Cost = config.Cost{Input: 100, Output: 500}
 	}
-	cfg.Budget.DefaultLimitUSD = 0.01
-	for i := range cfg.Routes {
-		cfg.Routes[i].MaxCostUSD = 0
+	cfg.Defaults.BudgetUSD = 0.01
+	for i := range cfg.Receptionist.Routes {
+		cfg.Receptionist.Routes[i].BudgetUSD = 0
 	}
 	r := newReceptionist(cfg)
 
@@ -199,13 +200,18 @@ func TestClassifierParseFailureFallsBack(t *testing.T) {
 	}
 }
 
-func TestOverridesForceStrategy(t *testing.T) {
+func TestOverridesForceStrategyAndModels(t *testing.T) {
 	cfg := testConfig()
 	r := newReceptionist(cfg)
 	st := pipeline.NewState("t", "simple question")
 	st.Class = pipeline.Classification{Complexity: "trivial", Domain: "chat", ToolNeed: "none"}
 
-	stages, err := r.Intake(context.Background(), st, Overrides{Strategy: "council", MaxCostUSD: 100}, func(events.Event) {})
+	ov := Overrides{
+		Strategy:  "council",
+		BudgetUSD: 100,
+		Models:    config.Models{Primary: "strong"},
+	}
+	stages, err := r.Intake(context.Background(), st, ov, func(events.Event) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,5 +221,25 @@ func TestOverridesForceStrategy(t *testing.T) {
 	}
 	if st.Budget.LimitUSD != 100 {
 		t.Fatalf("budget override not applied: %v", st.Budget.LimitUSD)
+	}
+}
+
+func TestInvalidOverrideRejectedBeforeStart(t *testing.T) {
+	cfg := testConfig()
+	r := newReceptionist(cfg)
+
+	cases := []Overrides{
+		{Strategy: "galactic_senate"},
+		{Thinking: "psychic"},
+		{Models: config.Models{Primary: "nonexistent-model"}},
+		{CouncilRounds: 99},
+		{ConsensusMethod: "coin_flip"},
+	}
+	for _, ov := range cases {
+		st := pipeline.NewState("t", "task")
+		st.Class = pipeline.Classification{Complexity: "trivial", Domain: "chat"}
+		if _, err := r.Intake(context.Background(), st, ov, func(events.Event) {}); err == nil {
+			t.Errorf("override %+v should have been rejected", ov)
+		}
 	}
 }

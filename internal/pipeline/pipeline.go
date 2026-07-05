@@ -34,6 +34,9 @@ type BudgetState struct {
 	LimitUSD float64 `json:"limit_usd"`
 	SpentUSD float64 `json:"spent_usd"`
 	Tokens   int     `json:"tokens"`
+	// WarnAt are the configured warn thresholds (receptionist.warn_thresholds);
+	// empty means the built-in 50/80/95% defaults.
+	WarnAt []float64 `json:"warn_at,omitempty"`
 	// WarnedPct records warn thresholds already fired, so budget.warn emits
 	// once per threshold even across resume.
 	WarnedPct []float64 `json:"warned_pct,omitempty"`
