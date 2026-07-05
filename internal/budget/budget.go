@@ -15,8 +15,8 @@ var DefaultWarnThresholds = []float64{0.50, 0.80, 0.95}
 
 // CheckWarn emits budget.warn once per crossed threshold (from the state's
 // configured WarnAt, else the defaults). Fired thresholds are recorded in
-// BudgetState so they survive resume. Stages call this after accounting each
-// provider call; the Executor also calls it between stages.
+// BudgetState so they survive resume. Stages call this after accounting
+// each provider call.
 func CheckWarn(b *pipeline.BudgetState, emit events.Emitter) {
 	if b.LimitUSD <= 0 {
 		return

@@ -50,6 +50,7 @@ func (e *Executor) Execute(ctx context.Context, stages []Stage, st *State) (*Sta
 		}
 
 		spentBefore := st.Budget.SpentUSD
+		turnsBefore := len(st.Transcript)
 		start := time.Now()
 		emit(events.Event{
 			Kind:  events.KindStageStart,
@@ -65,6 +66,13 @@ func (e *Executor) Execute(ctx context.Context, stages []Stage, st *State) (*Sta
 			st = next
 		}
 		if err != nil {
+			// Discard the failed stage's partial turns: the stage re-runs
+			// from scratch on resume, and stale partials would corrupt
+			// round counting and synthesis input. Spend stays accounted in
+			// Budget, and the event log retains the full record.
+			if len(st.Transcript) > turnsBefore {
+				st.Transcript = st.Transcript[:turnsBefore]
+			}
 			emit(events.Event{
 				Kind:  events.KindError,
 				Stage: stage.ID(),

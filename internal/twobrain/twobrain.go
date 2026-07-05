@@ -74,15 +74,16 @@ func LoadPrompts(divPath, convPath, refPath string) (Prompts, error) {
 }
 
 type Stage struct {
-	Divergent  provider.Provider // right brain
-	Convergent provider.Provider // left brain (often same base model)
-	Referee    provider.Provider // Models.Primary
-	Rounds     int               // 1..RoundsMax; default 2
-	DivTemp    float64           // default 1.0
-	ConvTemp   float64           // default 0.3
-	Prompts    Prompts
-	Tools      *thinking.ToolRegistry
-	MaxTokens  int
+	Divergent    provider.Provider // right brain
+	Convergent   provider.Provider // left brain (often same base model)
+	Referee      provider.Provider // Models.Primary
+	Rounds       int               // 1..RoundsMax; default 2
+	DivTemp      float64           // default 1.0
+	ConvTemp     float64           // default 0.3
+	Prompts      Prompts
+	Tools        *thinking.ToolRegistry
+	MaxToolCalls int // per-turn tool-loop cap (defaults.tool_call_cap)
+	MaxTokens    int
 }
 
 func (t *Stage) ID() string { return "twobrain" }
@@ -196,7 +197,7 @@ func (t *Stage) turn(ctx context.Context, st *pipeline.State, emit events.Emitte
 	if len(flagged) > 0 && t.Tools != nil {
 		req.Tools = t.Tools.DefsFor(flagged)
 	}
-	resp, usage, err := thinking.RunToolLoop(ctx, p, req, t.Tools, 3, emit, t.ID())
+	resp, usage, err := thinking.RunToolLoop(ctx, p, req, t.Tools, t.MaxToolCalls, emit, t.ID())
 	if err != nil {
 		return "", err
 	}

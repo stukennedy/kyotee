@@ -2,7 +2,10 @@ package council
 
 import (
 	"context"
+	"encoding/json"
+
 	"fmt"
+	"github.com/stukennedy/kyotee/internal/budget"
 	"math"
 	"sort"
 	"strings"
@@ -24,7 +27,7 @@ func (c *Stage) checkConsensus(ctx context.Context, st *pipeline.State, members 
 	case "similarity":
 		reached = c.checkSimilarity(ctx, members)
 	case "judge":
-		reached, summary = c.checkJudge(ctx, st, members)
+		reached, summary = c.checkJudge(ctx, st, members, emit)
 	default: // vote
 		reached, summary = c.checkVote(members, emit)
 	}
@@ -127,7 +130,7 @@ type judgeVerdict struct {
 }
 
 // checkJudge: a referee model reads all positions and rules on convergence.
-func (c *Stage) checkJudge(ctx context.Context, st *pipeline.State, members []*member) (bool, string) {
+func (c *Stage) checkJudge(ctx context.Context, st *pipeline.State, members []*member, emit events.Emitter) (bool, string) {
 	if c.Referee == nil {
 		return false, ""
 	}
@@ -143,6 +146,7 @@ Respond with JSON ONLY, no prose, no fences:
 		return false, ""
 	}
 	st.AddTurn(c.ID(), "judge", resp.Text(), resp.Usage)
+	budget.CheckWarn(&st.Budget, emit)
 	var v judgeVerdict
 	if err := jsonx.Parse(resp.Text(), &v); err != nil {
 		return false, ""
@@ -150,7 +154,9 @@ Respond with JSON ONLY, no prose, no fences:
 	// Surface judge-noted holdouts even when the debate later converges or
 	// deadlocks another way — genuine disagreement must not be papered over.
 	if len(v.Dissent) > 0 {
-		st.Meta[MetaDissent] = strings.Join(v.Dissent, "\n\n")
+		if data, err := json.Marshal(v.Dissent); err == nil {
+			st.Meta[MetaDissent] = string(data)
+		}
 	}
 	return v.Converged, v.Summary
 }
@@ -174,6 +180,7 @@ func (c *Stage) resolveDeadlock(ctx context.Context, st *pipeline.State, members
 			})
 			if err == nil {
 				st.AddTurn(c.ID(), "referee", resp.Text(), resp.Usage)
+				budget.CheckWarn(&st.Budget, emit)
 				st.Meta[MetaWinner] = resp.Text()
 			}
 		}
@@ -181,7 +188,7 @@ func (c *Stage) resolveDeadlock(ctx context.Context, st *pipeline.State, members
 		st.Meta[MetaWinner] = c.majorityChoice(members)
 	default: // synthesis_notes_dissent
 		mode = "synthesis_notes_dissent"
-		st.Meta[MetaDissent] = c.positionDigest(members)
+		st.Meta[MetaDissent] = dissentJSON(members)
 	}
 
 	st.Meta[MetaOutcome] = mode

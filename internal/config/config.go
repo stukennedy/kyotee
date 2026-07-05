@@ -81,11 +81,14 @@ type When struct {
 	ToolNeed   string `yaml:"tool_need"`
 }
 
+// Models doubles as the per-task override wire type (spec 07 §4), so it
+// carries json tags too — the HTTP contract must not depend on Go's
+// case-insensitive field matching.
 type Models struct {
-	Primary    string   `yaml:"primary"`
-	Divergent  string   `yaml:"divergent"`
-	Convergent string   `yaml:"convergent"`
-	Council    []string `yaml:"council"`
+	Primary    string   `yaml:"primary" json:"primary,omitempty"`
+	Divergent  string   `yaml:"divergent" json:"divergent,omitempty"`
+	Convergent string   `yaml:"convergent" json:"convergent,omitempty"`
+	Council    []string `yaml:"council" json:"council,omitempty"`
 }
 
 // Thinking tunes the fast/slow gate (spec 04, 07).
@@ -338,6 +341,11 @@ func (c *Config) Validate() error {
 		}
 		if err := validateWhen(ctx, r.When); err != nil {
 			return err
+		}
+		// Every strategy needs a primary (solo model / referee / synthesiser);
+		// catching it here beats failing every matched task at intake.
+		if r.Models.Primary == "" {
+			return fmt.Errorf("%s: models.primary is required", ctx)
 		}
 		for _, m := range append([]string{r.Models.Primary, r.Models.Divergent, r.Models.Convergent}, r.Models.Council...) {
 			if err := check(ctx, m); err != nil {

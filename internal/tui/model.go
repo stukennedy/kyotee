@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -118,9 +119,21 @@ type Model struct {
 	// Override & escalate (spec 08 §5): applied to the NEXT submitted task.
 	Override receptionist.Overrides
 
-	quitArmed bool
-	width     int
-	height    int
+	quitArmed    bool
+	width        int
+	height       int
+	cancelStream context.CancelFunc // stops the previous task's SSE stream
+}
+
+// startStream cancels any previous task's stream and returns a Sub for the
+// new one.
+func (m *Model) startStream(taskID string) app.Sub {
+	if m.cancelStream != nil {
+		m.cancelStream()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelStream = cancel
+	return m.Client.StreamSub(ctx, taskID)
 }
 
 func NewModel(client *Client) *Model {
@@ -184,7 +197,7 @@ func Update(m *Model, msg app.Msg) app.UpdateResult[*Model] {
 		}
 		m.reset(msg.TaskID)
 		m.Status = "task " + msg.TaskID
-		return app.WithSub(m, m.Client.StreamSub(msg.TaskID))
+		return app.WithSub(m, m.startStream(msg.TaskID))
 
 	case ConfigFetchedMsg:
 		if msg.Err != nil {
@@ -220,7 +233,7 @@ func Update(m *Model, msg app.Msg) app.UpdateResult[*Model] {
 		m.reset(msg.TaskID)
 		m.Status = "resuming " + msg.TaskID
 		m.Active = overlayNone
-		return app.WithSub(m, m.Client.StreamSub(msg.TaskID))
+		return app.WithSub(m, m.startStream(msg.TaskID))
 	}
 	return app.NoCmd(m)
 }

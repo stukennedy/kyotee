@@ -5,10 +5,9 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,7 +20,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/stukennedy/kyotee/internal/config"
-	"github.com/stukennedy/kyotee/internal/events"
 	"github.com/stukennedy/kyotee/internal/receptionist"
 	"github.com/stukennedy/kyotee/internal/server"
 	"github.com/stukennedy/kyotee/internal/state"
@@ -112,11 +110,21 @@ func rootCmd() *cobra.Command {
 				CouncilRounds: councilRounds, ConsensusMethod: consensusMethod,
 			}
 			if local {
+				// Serve the in-process engine on an ephemeral port and run
+				// the same client path, so --json/--wait/exit codes behave
+				// identically to the remote shim (spec 09 contract).
 				eng, _, err := buildEngine(configPath)
 				if err != nil {
 					return err
 				}
-				return askOnce(cmd.Context(), eng, prompt, ov)
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					return err
+				}
+				srv := &http.Server{Handler: eng.Handler()}
+				go srv.Serve(ln)
+				defer srv.Close()
+				return runRemoteAsk("http://"+ln.Addr().String(), prompt, ov, true, jsonOut, os.Stdout, os.Stderr)
 			}
 			return runRemoteAsk(engineURL(urlFlag), prompt, ov, doWait, jsonOut, os.Stdout, os.Stderr)
 		},
@@ -242,41 +250,6 @@ func buildEngine(configPath string) (*server.Engine, *config.Config, error) {
 	eng := server.NewEngine(cfg, store)
 	eng.ConfigPath = configPath
 	return eng, cfg, nil
-}
-
-// askOnce submits a task, tails its events to stderr, and prints the final
-// answer to stdout.
-func askOnce(ctx context.Context, eng *server.Engine, prompt string, ov receptionist.Overrides) error {
-	taskID, err := eng.Submit(prompt, ov)
-	if err != nil {
-		return err
-	}
-	ch, cancel := eng.Bus.Subscribe(taskID)
-	defer cancel()
-
-	w := bufio.NewWriter(os.Stderr)
-	defer w.Flush()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case ev := <-ch:
-			switch ev.Kind {
-			case events.KindTaskClassified, events.KindTaskRouted, events.KindThinkingMode,
-				events.KindThinkingToolChk, events.KindToolCall, events.KindBudgetWarn,
-				events.KindCouncilConsensus, events.KindError:
-				payload, _ := json.Marshal(ev.Payload)
-				fmt.Fprintf(w, "· %-20s %s\n", ev.Kind, payload)
-				w.Flush()
-			case events.KindTaskFinal:
-				text, _ := ev.Payload["text"].(string)
-				cost, _ := ev.Payload["total_cost_usd"].(float64)
-				fmt.Println(text)
-				fmt.Fprintf(w, "— total cost $%.4f\n", cost)
-				return nil
-			}
-		}
-	}
 }
 
 // configYAML serialises the default config for `kyotee init`.

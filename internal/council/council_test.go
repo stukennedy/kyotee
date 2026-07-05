@@ -140,7 +140,7 @@ func TestJudgeConsensus(t *testing.T) {
 	judgeYes := provider.NewFake("judge", "anthropic",
 		provider.TextResponse(`{"converged": true, "summary": "both say X", "dissent": []}`, 20, 20))
 	stage := &Stage{Referee: judgeYes, Consensus: ConsensusConfig{Method: "judge"}}
-	reached, summary := stage.checkJudge(context.Background(), st, members)
+	reached, summary := stage.checkJudge(context.Background(), st, members, func(events.Event) {})
 	if !reached || summary != "both say X" {
 		t.Fatalf("judge should report converged, got %v %q", reached, summary)
 	}
@@ -148,7 +148,7 @@ func TestJudgeConsensus(t *testing.T) {
 	judgeNo := provider.NewFake("judge", "anthropic",
 		provider.TextResponse(`{"converged": false, "summary": "", "dissent": ["timeline"]}`, 20, 20))
 	stage.Referee = judgeNo
-	if reached, _ := stage.checkJudge(context.Background(), st, members); reached {
+	if reached, _ := stage.checkJudge(context.Background(), st, members, func(events.Event) {}); reached {
 		t.Fatal("judge should report not converged")
 	}
 }
@@ -160,7 +160,7 @@ func TestVendorDiversityWarning(t *testing.T) {
 	}
 	st := pipeline.NewState("cw", "q")
 	emit, evs, mu := collect()
-	stage := &Stage{Members: members, Rounds: 1}
+	stage := &Stage{Members: members, Rounds: 1, RequireVendorDiversity: true}
 	if _, err := stage.Run(context.Background(), st, emit); err != nil {
 		t.Fatal(err)
 	}

@@ -234,9 +234,11 @@ func (r *Receptionist) preflight(route Route, st *pipeline.State, cfg *config.Co
 // assemble builds the ordered []Stage for the route (spec 03 §4):
 // Thinking(mode) → solver stage(s) → Output.
 func (r *Receptionist) assemble(route Route, cfg *config.Config, ov Overrides) ([]pipeline.Stage, []string, map[string]any, error) {
+	// Gate/prepass failures never block a task (CLAUDE.md: fail open) —
+	// with a nil gate the Thinking stage fails toward slow mode.
 	gate, err := r.resolve(cfg.Thinking.GateModel)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("thinking gate model: %w", err)
+		gate = nil
 	}
 	prepass, err := r.resolve(cfg.Thinking.PrepassModel)
 	if err != nil {
@@ -282,6 +284,7 @@ func (r *Receptionist) assemble(route Route, cfg *config.Config, ov Overrides) (
 			Rounds:  cfg.TwoBrain.Rounds,
 			DivTemp: cfg.TwoBrain.DivTemp, ConvTemp: cfg.TwoBrain.ConvTemp,
 			Prompts: prompts, Tools: r.Tools,
+			MaxToolCalls: cfg.Defaults.ToolCallCap,
 		})
 		models["divergent"], models["convergent"] = div.Name(), conv.Name()
 
@@ -304,6 +307,8 @@ func (r *Receptionist) assemble(route Route, cfg *config.Config, ov Overrides) (
 				Consensus:  council.ConsensusConfig{Method: method, Threshold: cfg.Council.Consensus.Threshold},
 				OnDeadlock: cfg.Council.OnDeadlock,
 				Referee:    primary, Embedder: r.Embedder, Tools: r.Tools,
+				RequireVendorDiversity: cfg.Council.RequireVendorDiversity,
+				MaxToolCalls:           cfg.Defaults.ToolCallCap,
 			},
 			&council.Synthesis{Model: primary},
 		)

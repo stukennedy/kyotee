@@ -169,7 +169,7 @@ func TestToolLoopTerminatesAtCap(t *testing.T) {
 	greedy := &provider.Fake{ModelName: "greedy", VendorName: "anthropic",
 		ScriptFn: func(call int, req provider.Request) (provider.Response, error) {
 			calls++
-			if len(req.Tools) == 0 {
+			if len(req.Tools) == 0 || req.ToolChoice == "none" {
 				return provider.TextResponse("final answer", 10, 10), nil
 			}
 			return provider.Response{

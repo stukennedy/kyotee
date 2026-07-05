@@ -29,6 +29,7 @@ func BuildRegistry(c *Config) *provider.MapRegistry {
 				ModelName: p.Name, ModelID: p.Model,
 				APIKey: apiKey, BaseURL: p.BaseURL,
 				InUSD: p.Cost.Input, OutUSD: p.Cost.Output, MaxCtx: p.MaxContext,
+				DefMaxTok: p.MaxTokens, DefTemp: p.Temp,
 			})
 		case "openai", "google", "local":
 			baseURL := p.BaseURL
@@ -39,6 +40,7 @@ func BuildRegistry(c *Config) *provider.MapRegistry {
 				ModelName: p.Name, ModelID: p.Model, VendorTag: p.Vendor,
 				APIKey: apiKey, BaseURL: baseURL, Reasoning: p.Reasoning,
 				InUSD: p.Cost.Input, OutUSD: p.Cost.Output, MaxCtx: p.MaxContext,
+				DefMaxTok: p.MaxTokens, DefTemp: p.Temp,
 			})
 		case "mock":
 			fake := provider.NewFake(p.Name, "mock")

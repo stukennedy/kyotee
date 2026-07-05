@@ -33,6 +33,9 @@ type Request struct {
 	// ReasoningEffort is a normalized knob: "minimal" | "low" | "medium" | "high".
 	// Adapters map this to vendor-specific reasoning/thinking params.
 	ReasoningEffort string
+	// ToolChoice: "" (auto) or "none" — "none" keeps Tools defined (required
+	// when the history contains tool blocks) but forbids further tool calls.
+	ToolChoice string
 	// Stream, if non-nil, receives incremental deltas for observability.
 	Stream func(Delta)
 	// Metadata is opaque pass-through for tracing (task ID, stage, etc.).
@@ -68,8 +71,10 @@ func (r Response) ToolCalls() []*ToolCall {
 }
 
 type Block struct {
-	Type       string      `json:"type"`                  // "text" | "tool_use" | "tool_result"
-	Text       string      `json:"text,omitempty"`        // when Type == "text"
+	Type       string      `json:"type"`                  // "text" | "tool_use" | "tool_result" | "thinking" | "redacted_thinking"
+	Text       string      `json:"text,omitempty"`        // when Type == "text" or "thinking"
+	Signature  string      `json:"signature,omitempty"`   // thinking block signature (must round-trip)
+	Data       string      `json:"data,omitempty"`        // redacted_thinking opaque payload
 	ToolCall   *ToolCall   `json:"tool_call,omitempty"`   // when Type == "tool_use"
 	ToolResult *ToolResult `json:"tool_result,omitempty"` // when Type == "tool_result"
 }

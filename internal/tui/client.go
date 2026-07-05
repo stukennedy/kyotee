@@ -50,21 +50,30 @@ func (c *Client) SubmitCmd(text string, ov receptionist.Overrides) app.Cmd {
 }
 
 // StreamSub opens the task's SSE stream and forwards each engine event as an
-// SSEMsg. Tooey's SSE client auto-reconnects; the engine replays from Seq 0
-// on each connect and the model de-dups by Seq.
-func (c *Client) StreamSub(taskID string) app.Sub {
+// SSEMsg. Tooey's SSE client auto-reconnects (the engine replays from Seq 0
+// on each connect; the model de-dups by Seq) until either the parent ctx is
+// cancelled (a new task superseded this stream) or the engine sends the
+// terminal "done" frame — without those two exits, every viewed task would
+// leak a reconnect loop for the rest of the session.
+func (c *Client) StreamSub(ctx context.Context, taskID string) app.Sub {
 	return func(send func(app.Msg)) app.Msg {
+		sctx, cancel := context.WithCancel(ctx)
+		defer cancel() // stops the sse.Client reconnect goroutine on return
 		client := &sse.Client{
 			URL:        c.BaseURL + "/v1/tasks/" + taskID + "/events",
 			RetryDelay: 2 * time.Second,
 		}
-		ch, err := client.Connect(context.Background())
+		ch, err := client.Connect(sctx)
 		if err != nil {
 			send(SSEStatusMsg{Connected: false})
 			return nil
 		}
 		send(SSEStatusMsg{Connected: true})
 		for raw := range ch {
+			if raw.Type == "done" {
+				send(SSEStatusMsg{Connected: false})
+				return nil
+			}
 			var ev events.Event
 			if err := json.Unmarshal(raw.Data, &ev); err != nil {
 				continue

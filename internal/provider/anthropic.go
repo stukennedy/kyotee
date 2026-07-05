@@ -21,6 +21,8 @@ type Anthropic struct {
 	InUSD      float64
 	OutUSD     float64
 	MaxCtx     int
+	DefMaxTok  int     // config default when Request.MaxTokens == 0
+	DefTemp    float64 // config default when Request.Temperature == 0
 	HTTPClient *http.Client
 }
 
@@ -52,19 +54,28 @@ type anthropicMsg struct {
 }
 
 func (a *Anthropic) Generate(ctx context.Context, req Request) (Response, error) {
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = a.DefMaxTok
+	}
+	if maxTokens == 0 {
+		maxTokens = 4096
+	}
+	temperature := req.Temperature
+	if temperature == 0 {
+		temperature = a.DefTemp
+	}
+
 	body := map[string]any{
 		"model":      a.ModelID,
-		"max_tokens": req.MaxTokens,
+		"max_tokens": maxTokens,
 		"messages":   a.encodeMessages(req.Messages),
-	}
-	if body["max_tokens"] == 0 {
-		body["max_tokens"] = 4096
 	}
 	if req.System != "" {
 		body["system"] = req.System
 	}
-	if req.Temperature > 0 {
-		body["temperature"] = req.Temperature
+	if temperature > 0 {
+		body["temperature"] = temperature
 	}
 	if len(req.Tools) > 0 {
 		tools := make([]map[string]any, 0, len(req.Tools))
@@ -80,14 +91,20 @@ func (a *Anthropic) Generate(ctx context.Context, req Request) (Response, error)
 			})
 		}
 		body["tools"] = tools
+		if req.ToolChoice == "none" {
+			body["tool_choice"] = map[string]any{"type": "none"}
+		}
 	}
-	if budget, ok := anthropicThinkingBudget[req.ReasoningEffort]; ok {
+	// Extended thinking forbids temperature. When the caller set an explicit
+	// temperature (e.g. the two-brain divergent/convergent split, where
+	// sampling IS the mechanism — spec 05), temperature wins and thinking
+	// stays off; otherwise the effort knob maps to a thinking budget.
+	if budget, ok := anthropicThinkingBudget[req.ReasoningEffort]; ok && req.Temperature == 0 {
 		mt, _ := body["max_tokens"].(int)
 		if mt <= budget {
 			body["max_tokens"] = budget + 4096
 		}
 		body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
-		// Extended thinking requires temperature to be unset.
 		delete(body, "temperature")
 	}
 
@@ -98,11 +115,14 @@ func (a *Anthropic) Generate(ctx context.Context, req Request) (Response, error)
 
 	var apiResp struct {
 		Content []struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text"`
-			ID    string          `json:"id"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+			Thinking  string          `json:"thinking"`
+			Signature string          `json:"signature"`
+			Data      string          `json:"data"`
 		} `json:"content"`
 		StopReason string `json:"stop_reason"`
 		Usage      struct {
@@ -125,6 +145,13 @@ func (a *Anthropic) Generate(ctx context.Context, req Request) (Response, error)
 			resp.Content = append(resp.Content, Block{Type: "tool_use", ToolCall: &ToolCall{
 				ID: c.ID, Name: c.Name, Input: input,
 			}})
+		// Thinking blocks must be preserved: when extended thinking is on,
+		// the API requires assistant tool_use turns echoed back in a tool
+		// loop to retain their (signed) thinking blocks.
+		case "thinking":
+			resp.Content = append(resp.Content, Block{Type: "thinking", Text: c.Thinking, Signature: c.Signature})
+		case "redacted_thinking":
+			resp.Content = append(resp.Content, Block{Type: "redacted_thinking", Data: c.Data})
 		}
 	}
 	resp.Usage = Usage{
@@ -153,6 +180,12 @@ func (a *Anthropic) encodeMessages(msgs []Message) []anthropicMsg {
 			switch b.Type {
 			case "text":
 				blocks = append(blocks, map[string]any{"type": "text", "text": b.Text})
+			case "thinking":
+				blocks = append(blocks, map[string]any{
+					"type": "thinking", "thinking": b.Text, "signature": b.Signature,
+				})
+			case "redacted_thinking":
+				blocks = append(blocks, map[string]any{"type": "redacted_thinking", "data": b.Data})
 			case "tool_use":
 				if b.ToolCall != nil {
 					input := b.ToolCall.Input

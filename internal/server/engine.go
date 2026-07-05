@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -49,8 +50,10 @@ func NewEngine(cfg *config.Config, store *state.FileStore) *Engine {
 	}
 	e.rebuild(cfg)
 	// Persist every event to the per-task ndjson log (spec 02 §3): replay
-	// survives engine restarts.
-	go e.elog.follow(e.Bus)
+	// survives engine restarts. Subscribe synchronously so no head event
+	// published between engine construction and follower startup is lost.
+	ch, _ := e.Bus.Subscribe("")
+	go e.elog.drain(ch)
 	return e
 }
 
@@ -114,6 +117,11 @@ func (e *Engine) Submit(text string, ov receptionist.Overrides) (string, error) 
 	}
 	taskID := newTaskID()
 	st := pipeline.NewState(taskID, text)
+	// Persist the submit-time overrides so resume re-applies them — an
+	// override-escalated council task must not re-route as solo on resume.
+	if ovJSON, err := json.Marshal(ov); err == nil {
+		st.Meta["overrides"] = string(ovJSON)
+	}
 
 	e.mu.Lock()
 	e.running[taskID] = true
@@ -145,7 +153,12 @@ func (e *Engine) Resume(taskID string) error {
 	if persisted := e.elog.read(taskID); len(persisted) > 0 {
 		e.Bus.SeedSeq(taskID, persisted[len(persisted)-1].Seq+1)
 	}
-	go e.run(st, receptionist.Overrides{})
+	// Re-apply the submit-time overrides persisted in Meta.
+	var ov receptionist.Overrides
+	if raw := st.Meta["overrides"]; raw != "" {
+		_ = json.Unmarshal([]byte(raw), &ov)
+	}
+	go e.run(st, ov)
 	return nil
 }
 

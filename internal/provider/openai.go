@@ -23,7 +23,9 @@ type OpenAICompat struct {
 	InUSD      float64
 	OutUSD     float64
 	MaxCtx     int
-	Reasoning  bool // model accepts reasoning_effort
+	Reasoning  bool    // model accepts reasoning_effort
+	DefMaxTok  int     // config default when Request.MaxTokens == 0
+	DefTemp    float64 // config default when Request.Temperature == 0
 	HTTPClient *http.Client
 }
 
@@ -52,11 +54,19 @@ func (o *OpenAICompat) Generate(ctx context.Context, req Request) (Response, err
 		"model":    o.ModelID,
 		"messages": msgs,
 	}
-	if req.MaxTokens > 0 {
-		body["max_completion_tokens"] = req.MaxTokens
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = o.DefMaxTok
 	}
-	if req.Temperature > 0 {
-		body["temperature"] = req.Temperature
+	if maxTokens > 0 {
+		body["max_completion_tokens"] = maxTokens
+	}
+	temperature := req.Temperature
+	if temperature == 0 {
+		temperature = o.DefTemp
+	}
+	if temperature > 0 {
+		body["temperature"] = temperature
 	}
 	if o.Reasoning && req.ReasoningEffort != "" {
 		// OpenAI accepts "minimal" | "low" | "medium" | "high" — 1:1 mapping.
@@ -79,6 +89,9 @@ func (o *OpenAICompat) Generate(ctx context.Context, req Request) (Response, err
 			})
 		}
 		body["tools"] = tools
+		if req.ToolChoice == "none" {
+			body["tool_choice"] = "none"
+		}
 	}
 
 	raw, err := o.post(ctx, body)

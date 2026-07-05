@@ -191,6 +191,9 @@ func (c *remoteClient) wait(taskID string, progress io.Writer) (*askResult, erro
 				res.TotalTokens = int(f)
 			}
 			finalReason, _ = p["reason"].(string)
+			// A later task.final supersedes any terminal error replayed from
+			// a previous failed run of a resumed task.
+			terminalErr = nil
 		case events.KindError:
 			if t, _ := p["terminal"].(bool); t {
 				msg, _ := p["message"].(string)
@@ -208,14 +211,17 @@ func (c *remoteClient) wait(taskID string, progress io.Writer) (*askResult, erro
 		return res, errBudgetNoAnswer
 	}
 
-	// Dissent lives in the persisted state's Meta, not in the event stream.
+	// Dissent lives in the persisted state's Meta as a JSON string array.
 	var st pipeline.State
 	if err := c.getJSON("/v1/tasks/"+taskID, &st); err == nil {
 		if d := strings.TrimSpace(st.Meta["council.dissent"]); d != "" {
-			for _, part := range strings.Split(d, "\n\n") {
-				if part = strings.TrimSpace(part); part != "" {
-					res.Dissent = append(res.Dissent, part)
-				}
+			var entries []string
+			if json.Unmarshal([]byte(d), &entries) == nil {
+				res.Dissent = entries
+			} else {
+				// Legacy/free-form dissent: keep it whole rather than
+				// fragmenting prose on arbitrary separators.
+				res.Dissent = []string{d}
 			}
 		}
 		if res.Strategy == "" {

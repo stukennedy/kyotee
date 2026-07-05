@@ -28,7 +28,10 @@ func RunToolLoop(ctx context.Context, p provider.Provider, req provider.Request,
 		total.Add(resp.Usage)
 
 		calls := resp.ToolCalls()
-		if len(calls) == 0 || len(req.Tools) == 0 {
+		// Terminate on a text answer, on toolless requests, or after the
+		// cap-forced ToolChoice="none" round (even if the model still tried
+		// to call a tool) — the loop must never spin.
+		if len(calls) == 0 || len(req.Tools) == 0 || req.ToolChoice == "none" {
 			return resp, total, nil
 		}
 
@@ -70,8 +73,11 @@ func RunToolLoop(ctx context.Context, p provider.Provider, req provider.Request,
 		req.Messages = append(req.Messages, provider.Message{Role: "tool", Content: results})
 
 		if callsUsed >= maxCalls {
-			// Force a final, tool-free completion so we can't loop forever.
-			req.Tools = nil
+			// Force a final completion with no further tool use. Tools stay
+			// DEFINED (histories containing tool_use/tool_result blocks are
+			// rejected by vendors when the tools param is missing); the
+			// adapter maps ToolChoice="none" to the vendor's knob.
+			req.ToolChoice = "none"
 		}
 	}
 }

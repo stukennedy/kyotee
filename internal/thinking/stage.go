@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/stukennedy/kyotee/internal/budget"
+
 	"github.com/stukennedy/kyotee/internal/events"
 	"github.com/stukennedy/kyotee/internal/jsonx"
 	"github.com/stukennedy/kyotee/internal/pipeline"
@@ -154,7 +156,10 @@ func (s *Stage) autoGate(ctx context.Context, st *pipeline.State, emit events.Em
 		return "slow", fmt.Sprintf("low_confidence: classifier at %.2f", st.Class.Confidence), nil
 	}
 	if s.Gate == nil {
-		return "fast", "no gate model configured", nil
+		// Fail open toward slow: no gate means we cannot rule out a
+		// present-state fact, and a wasted slow pass is cheaper than a
+		// confidently stale answer.
+		return "slow", "no gate model configured — failing open to slow", nil
 	}
 
 	var triggerList strings.Builder
@@ -183,6 +188,7 @@ Respond with JSON ONLY, no prose, no fences:
 		return "slow", "gate error, defaulting slow: " + err.Error(), nil
 	}
 	st.AddTurn(s.ID(), "gate", resp.Text(), resp.Usage)
+	budget.CheckWarn(&st.Budget, emit)
 
 	var v gateVerdict
 	if err := jsonx.Parse(resp.Text(), &v); err != nil {
@@ -228,21 +234,19 @@ Respond with JSON ONLY, no prose, no fences:
 		Metadata:  map[string]string{"task_id": st.TaskID, "stage": "thinking.prepass"},
 	})
 
+	// On any pre-pass failure (call error or unparseable output), fall back
+	// to the gate's suggestion.
 	var v prePassVerdict
-	switch {
-	case err != nil:
-		// Pre-pass failure falls back to the gate's suggestion, if any.
+	parsed := false
+	if err == nil {
+		st.AddTurn(s.ID(), "prepass", resp.Text(), resp.Usage)
+		budget.CheckWarn(&st.Budget, emit)
+		parsed = jsonx.Parse(resp.Text(), &v) == nil
+	}
+	if !parsed {
 		v = prePassVerdict{ToolsToUse: gateSuggested}
 		if len(gateSuggested) > 0 {
 			v.Verdict = "use_tools"
-		}
-	default:
-		st.AddTurn(s.ID(), "prepass", resp.Text(), resp.Usage)
-		if perr := jsonx.Parse(resp.Text(), &v); perr != nil {
-			v = prePassVerdict{ToolsToUse: gateSuggested}
-			if len(gateSuggested) > 0 {
-				v.Verdict = "use_tools"
-			}
 		}
 	}
 

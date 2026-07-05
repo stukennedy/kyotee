@@ -5,6 +5,7 @@ package council
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -46,7 +47,11 @@ type Stage struct {
 	Referee    provider.Provider // judge-method checks and referee deadlock resolution
 	Embedder   Embedder          // similarity method
 	Tools      *thinking.ToolRegistry
-	MaxTokens  int
+	// RequireVendorDiversity gates the same-vendor warning (config
+	// council.require_vendor_diversity).
+	RequireVendorDiversity bool
+	MaxToolCalls           int // per-member tool-loop cap (defaults.tool_call_cap)
+	MaxTokens              int
 }
 
 func (c *Stage) ID() string { return "council" }
@@ -81,7 +86,9 @@ func (c *Stage) Run(ctx context.Context, st *pipeline.State, emit events.Emitter
 		method = "vote"
 	}
 
-	c.warnIfSameVendor(emit)
+	if c.RequireVendorDiversity {
+		c.warnIfSameVendor(emit)
+	}
 
 	members := make([]*member, len(c.Members))
 	for i, p := range c.Members {
@@ -96,7 +103,7 @@ func (c *Stage) Run(ctx context.Context, st *pipeline.State, emit events.Emitter
 		wg.Add(1)
 		go func(i int, m *member) {
 			defer wg.Done()
-			text, usage, err := c.memberCall(ctx, m.p, st, c.openingPrompt(st, method))
+			text, usage, err := c.memberCall(ctx, m.p, st, c.openingPrompt(st, method), emit)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -146,7 +153,7 @@ func (c *Stage) Run(ctx context.Context, st *pipeline.State, emit events.Emitter
 		}
 		if st.Budget.Exhausted() {
 			st.Meta[MetaOutcome] = "budget_halt"
-			st.Meta[MetaDissent] = c.positionDigest(members)
+			st.Meta[MetaDissent] = dissentJSON(members)
 			emit(events.Event{
 				Kind: events.KindCouncilConsensus, Stage: c.ID(),
 				Payload: map[string]any{"reached": false, "method": "budget_halt", "rounds_used": roundsUsed},
@@ -161,7 +168,7 @@ func (c *Stage) Run(ctx context.Context, st *pipeline.State, emit events.Emitter
 			rwg.Add(1)
 			go func(m *member) {
 				defer rwg.Done()
-				text, usage, err := c.memberCall(ctx, m.p, st, c.rebuttalPrompt(st, m, snapshot, r, method))
+				text, usage, err := c.memberCall(ctx, m.p, st, c.rebuttalPrompt(st, m, snapshot, r, method), emit)
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
@@ -200,8 +207,11 @@ func (c *Stage) Run(ctx context.Context, st *pipeline.State, emit events.Emitter
 	return st, nil
 }
 
-// memberCall runs one debater turn, honoring thinking effort and flagged tools.
-func (c *Stage) memberCall(ctx context.Context, p provider.Provider, st *pipeline.State, prompt string) (string, provider.Usage, error) {
+// memberCall runs one debater turn, honoring thinking effort and flagged
+// tools. The real emitter is passed through: tool.call/tool.result events
+// from members must reach the bus (MemBus.Publish is mutex-protected, so
+// emitting from parallel member goroutines is safe).
+func (c *Stage) memberCall(ctx context.Context, p provider.Provider, st *pipeline.State, prompt string, emit events.Emitter) (string, provider.Usage, error) {
 	flagged := thinking.FlaggedTools(st)
 	req := provider.Request{
 		System: "You are one member of a council of AI models from different vendors debating a hard problem. Be substantive, concise, and willing to change your mind when another member's argument is better." +
@@ -214,7 +224,7 @@ func (c *Stage) memberCall(ctx context.Context, p provider.Provider, st *pipelin
 	if len(flagged) > 0 && c.Tools != nil {
 		req.Tools = c.Tools.DefsFor(flagged)
 	}
-	resp, usage, err := thinking.RunToolLoop(ctx, p, req, c.Tools, 3, func(events.Event) {}, c.ID())
+	resp, usage, err := thinking.RunToolLoop(ctx, p, req, c.Tools, c.MaxToolCalls, emit, c.ID())
 	if err != nil {
 		return "", usage, err
 	}
@@ -264,6 +274,21 @@ func (c *Stage) positionSnapshot(members []*member) []string {
 
 func (c *Stage) positionDigest(members []*member) string {
 	return strings.Join(c.positionSnapshot(members), "\n\n")
+}
+
+// dissentJSON records unresolved positions as a JSON string array in Meta —
+// one entry per member — so consumers (the --json contract) never have to
+// split free-form prose on separators.
+func dissentJSON(members []*member) string {
+	entries := make([]string, 0, len(members))
+	for _, m := range members {
+		entries = append(entries, fmt.Sprintf("[%s] %s", m.p.Name(), distill(m.position, 800)))
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func (m *member) parseVote(method string) {

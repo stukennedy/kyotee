@@ -48,11 +48,18 @@ func (f *FileRead) Exec(_ context.Context, input map[string]any) (string, error)
 	if strings.TrimSpace(rel) == "" {
 		return "", fmt.Errorf("%s: empty path", f.name)
 	}
-	root, err := filepath.Abs(f.root)
+	rootAbs, err := filepath.Abs(f.root)
 	if err != nil {
 		return "", err
 	}
-	target, err := filepath.Abs(filepath.Join(root, rel))
+	// Resolve symlinks on BOTH sides before the containment check — a
+	// symlink inside the root must not smuggle out-of-sandbox files into
+	// model prompts.
+	root, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("%s: resolve root: %w", f.name, err)
+	}
+	target, err := filepath.EvalSymlinks(filepath.Join(rootAbs, rel))
 	if err != nil {
 		return "", err
 	}

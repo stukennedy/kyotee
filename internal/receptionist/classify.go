@@ -3,6 +3,8 @@ package receptionist
 import (
 	"context"
 
+	"github.com/stukennedy/kyotee/internal/budget"
+
 	"github.com/stukennedy/kyotee/internal/events"
 	"github.com/stukennedy/kyotee/internal/jsonx"
 	"github.com/stukennedy/kyotee/internal/pipeline"
@@ -49,6 +51,7 @@ func (r *Receptionist) Classify(ctx context.Context, st *pipeline.State, emit ev
 		return fallbackClass
 	}
 	st.AddTurn("receptionist", "classifier", resp.Text(), resp.Usage)
+	budget.CheckWarn(&st.Budget, emit)
 
 	var class pipeline.Classification
 	if err := jsonx.Parse(resp.Text(), &class); err != nil {
