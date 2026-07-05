@@ -95,25 +95,76 @@ func rootCmd() *cobra.Command {
 	}
 	tuiCmd.Flags().StringVar(&attachURL, "url", "http://127.0.0.1:8484", "engine base URL")
 
-	var strategy, thinkingMode string
+	// ask is the Skill shim (spec 09): a stateless HTTP client for a running
+	// engine. --local runs an in-process engine instead (no daemon needed).
+	var strategy, thinkingMode, consensusMethod, urlFlag string
 	var maxCost float64
+	var councilRounds int
+	var doWait, jsonOut, local bool
 	ask := &cobra.Command{
 		Use:   "ask [prompt]",
-		Short: "Run one task in-process and print the answer (no TUI)",
+		Short: "Submit a task to a running engine and print the answer",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			eng, _, err := buildEngine(configPath)
-			if err != nil {
-				return err
-			}
 			prompt := strings.Join(args, " ")
-			ov := receptionist.Overrides{Strategy: strategy, Thinking: thinkingMode, BudgetUSD: maxCost}
-			return askOnce(cmd.Context(), eng, prompt, ov)
+			ov := receptionist.Overrides{
+				Strategy: strategy, Thinking: thinkingMode, BudgetUSD: maxCost,
+				CouncilRounds: councilRounds, ConsensusMethod: consensusMethod,
+			}
+			if local {
+				eng, _, err := buildEngine(configPath)
+				if err != nil {
+					return err
+				}
+				return askOnce(cmd.Context(), eng, prompt, ov)
+			}
+			return runRemoteAsk(engineURL(urlFlag), prompt, ov, doWait, jsonOut, os.Stdout, os.Stderr)
 		},
 	}
 	ask.Flags().StringVar(&strategy, "strategy", "", "force strategy: solo|twobrain|council")
 	ask.Flags().StringVar(&thinkingMode, "thinking", "", "force thinking mode: fast|slow|auto")
 	ask.Flags().Float64Var(&maxCost, "budget", 0, "per-task budget ceiling in USD")
+	ask.Flags().IntVar(&councilRounds, "council-rounds", 0, "override council rounds")
+	ask.Flags().StringVar(&consensusMethod, "consensus", "", "override consensus method: vote|similarity|judge")
+	ask.Flags().BoolVar(&doWait, "wait", false, "stream progress to stderr and block until the answer; without it, print task_id and return")
+	ask.Flags().BoolVar(&jsonOut, "json", false, "print the stable JSON result contract")
+	ask.Flags().BoolVar(&local, "local", false, "run an in-process engine instead of connecting to one")
+	ask.Flags().StringVar(&urlFlag, "url", "", "engine base URL (default $KYOTEE_URL or "+defaultEngineURL+")")
+
+	var resumeWait, resumeJSON bool
+	var resumeURL string
+	resumeCmd := &cobra.Command{
+		Use:   "resume <task_id>",
+		Short: "Resume a persisted task on a running engine",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRemoteResume(engineURL(resumeURL), args[0], resumeWait, resumeJSON, os.Stdout, os.Stderr)
+		},
+	}
+	resumeCmd.Flags().BoolVar(&resumeWait, "wait", false, "stream progress and block until the task finishes")
+	resumeCmd.Flags().BoolVar(&resumeJSON, "json", false, "print the stable JSON result contract")
+	resumeCmd.Flags().StringVar(&resumeURL, "url", "", "engine base URL")
+
+	var statusURL string
+	statusCmd := &cobra.Command{
+		Use:   "status <task_id>",
+		Short: "Print a task's persisted State snapshot",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRemoteStatus(engineURL(statusURL), args[0], os.Stdout)
+		},
+	}
+	statusCmd.Flags().StringVar(&statusURL, "url", "", "engine base URL")
+
+	var providersURL string
+	providersCmd := &cobra.Command{
+		Use:   "providers",
+		Short: "List the engine's registered models, capabilities, and costs",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRemoteProviders(engineURL(providersURL), os.Stdout)
+		},
+	}
+	providersCmd.Flags().StringVar(&providersURL, "url", "", "engine base URL")
 
 	initCmd := &cobra.Command{
 		Use:   "init",
@@ -172,7 +223,7 @@ func rootCmd() *cobra.Command {
 		},
 	})
 
-	root.AddCommand(serve, tuiCmd, ask, initCmd, configCmd)
+	root.AddCommand(serve, tuiCmd, ask, resumeCmd, statusCmd, providersCmd, initCmd, configCmd)
 	return root
 }
 

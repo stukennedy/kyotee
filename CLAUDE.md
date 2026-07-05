@@ -59,6 +59,10 @@ Dependency order:
 - `internal/tui` — Tooey (v0.5, generic Elm API) front-end; pure SSE
   consumer + HTTP action poster; modals are Overlay + focus scopes
   (Escape → DismissMsg); golden-frame tests via tooeytest.
+- `remote.go` (main package) — spec-09 CLI shim: `ask/resume/status/
+  providers` as stateless HTTP clients with `--wait` SSE tailing and the
+  stable `--json` contract (answer, consensus, dissent, cost); consumed by
+  `skill/SKILL.md`.
 
 ## Conventions
 

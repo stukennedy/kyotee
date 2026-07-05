@@ -39,11 +39,13 @@ export ANTHROPIC_API_KEY=...  # plus OPENAI_API_KEY / GEMINI_API_KEY for council
 ./kyotee                      # engine + TUI
 ```
 
-One-shot, no TUI:
+One-shot, no TUI (`--local` runs an in-process engine; otherwise `ask` is a
+thin client for a running `kyotee serve`, per the spec-09 skill adapter):
 
 ```bash
-./kyotee ask "who is the current UK prime minister?"      # → slow mode, web_search, grounded answer
-./kyotee ask --strategy council --budget 5 "monolith or microservices for a 4-person team?"
+./kyotee ask --local "who is the current UK prime minister?"   # slow mode, web_search, grounded answer
+./kyotee ask --wait --strategy council --budget 5 "monolith or microservices for a 4-person team?"
+./kyotee ask --wait --json --strategy council "..."            # stable JSON: answer, consensus, dissent, cost
 ```
 
 Headless engine + separate TUI:
@@ -146,6 +148,13 @@ mechanism that produces the behavioural split.
 go test ./...        # everything runs on scripted fake providers — no keys
 go test -race ./...  # council openings/rebuttals are parallel
 ```
+
+## Claude Code skill
+
+[`skill/SKILL.md`](skill/SKILL.md) lets a Claude Code session delegate a hard
+sub-decision to a running engine ("consult a panel, not become the panel"):
+`kyotee ask --strategy council --wait --json` returns the synthesised answer
+with consensus state and any dissent, ready to fold back into the session.
 
 Specs are in [`docs/specs/`](docs/specs/); architecture notes in
 [`CLAUDE.md`](CLAUDE.md).

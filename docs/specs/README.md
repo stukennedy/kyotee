@@ -3,17 +3,15 @@
 Numbered specs for the Kyotee multi-model harness. Read `00-overview.md`
 first; `10-build-sequence.md` is the dependency-ordered build plan.
 
-Provided: 00, 01, 02, 03, 04, 05, 06, 07, 08, 10.
-
-Still missing: **09 — Skill adapter** (the `SKILL.md` + thin CLI shim so
-Claude Code can invoke Harness patterns mid-session). The engine surface it
-needs (`ask`/`resume`/`status`/`providers` over HTTP) is already in place;
-implement `skill/SKILL.md` + shim once the spec lands.
+All eleven specs (00–10) are present.
 
 Kyotee-specific adaptations from the specs (deliberate, small):
 
 - Single `kyotee` binary instead of `harnessd` + `harness-cli`
-  (`kyotee serve` = harnessd; `kyotee ask/config validate` = the CLI).
+  (`kyotee serve` = harnessd; `kyotee ask/resume/status/providers/config
+  validate` = the CLI shim from spec 09, honouring `KYOTEE_URL` first and
+  `HARNESS_URL` as a fallback; `kyotee ask --local` additionally runs a
+  one-shot in-process engine, no daemon needed).
 - State and config live under `~/.kyotee/` rather than `~/.harness/`.
 - `google`/`local` vendors ride the OpenAI-compatible adapter (Gemini via
   Google's compat endpoint) instead of bespoke adapters — same contract,

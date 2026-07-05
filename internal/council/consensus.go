@@ -147,6 +147,11 @@ Respond with JSON ONLY, no prose, no fences:
 	if err := jsonx.Parse(resp.Text(), &v); err != nil {
 		return false, ""
 	}
+	// Surface judge-noted holdouts even when the debate later converges or
+	// deadlocks another way — genuine disagreement must not be papered over.
+	if len(v.Dissent) > 0 {
+		st.Meta[MetaDissent] = strings.Join(v.Dissent, "\n\n")
+	}
 	return v.Converged, v.Summary
 }
 
