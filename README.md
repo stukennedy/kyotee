@@ -1,155 +1,160 @@
 # Kyotee
 
-Autonomous development agent for Claude Code. Build projects from conversation to code.
+A multi-model AI harness. Every task walks in the front door, gets classified
+by a cheap model, and is routed to the cheapest strategy that can actually
+solve it — one model, a divergent/convergent two-brain pair, or a council of
+models from different vendors that debate to consensus. Thinking speed is a
+structural decision, not a hope: present-state facts trigger a tool pre-pass
+so the solver searches instead of answering from stale weights. Everything is
+budgeted, checkpointed, resumable, and observable live in a terminal UI.
 
 ```
-Discovery                    Implementation
-    │                              │
-    ▼                              ▼
-┌─────────┐                  ┌───────────┐
-│  Chat   │    Approve       │ Autonomous│
-│  about  │ ───────────────► │   Build   │
-│  what   │     Spec         │           │
-│  to     │                  │ (files,   │
-│  build  │                  │  tests,   │
-└─────────┘                  │  etc.)    │
-                             └───────────┘
+            ┌──────────────┐   task.classified   ┌─────────────────────────┐
+  prompt ──►│ Receptionist │────────────────────►│ Route (config rules)    │
+            │ (cheap model)│                     │ first match wins        │
+            └──────────────┘                     └───────────┬─────────────┘
+                                                             │ preflight: too pricey? downgrade
+                     ┌───────────────────────────────────────┼──────────────┐
+                     ▼                                       ▼              ▼
+              ┌────────────┐                         ┌────────────┐  ┌────────────┐
+              │  Thinking  │  fast/slow gate +       │  Thinking  │  │  Thinking  │
+              │            │  tool-need pre-pass     │            │  │            │
+              ├────────────┤                         ├────────────┤  ├────────────┤
+              │    Solo    │                         │  Two-Brain │  │  Council   │
+              │            │                         │ div ⇄ conv │  │ ≥3 vendors │
+              │            │                         │  referee   │  │  debate    │
+              └─────┬──────┘                         └─────┬──────┘  ├────────────┤
+                    │                                      │         │ Synthesis  │
+                    ▼                                      ▼         └─────┬──────┘
+                 Output ◄──────────────────────────────────┴───────────────┘
+              (Draft→Final, task.final, cost breakdown)
 ```
 
-## How It Works
-
-1. **Discovery** - Chat with Kyotee about what you want to build
-2. **Spec** - Kyotee generates a structured specification
-3. **Approve** - Review and confirm the spec
-4. **Build** - Kyotee implements autonomously, tracking progress
-
-The key: separate *what* (interactive) from *how* (autonomous).
-
-## Installation
-
-Requires [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated.
+## Quick start
 
 ```bash
-git clone https://github.com/stukennedy/kyotee.git
-cp -r kyotee/.claude/skills/kyotee ~/.claude/skills/
+go build -o kyotee .
+./kyotee init                 # write ~/.kyotee/config.yaml
+export ANTHROPIC_API_KEY=...  # plus OPENAI_API_KEY / GEMINI_API_KEY for councils
+./kyotee                      # engine + TUI
 ```
 
-## Usage
-
-In Claude Code, run:
-
-```
-/kyotee
-```
-
-### Built-in Tech Stack Patterns
-
-Kyotee includes patterns for common tech stacks in `references/`:
-
-| Pattern | Description |
-|---------|-------------|
-| `hono-datastar.md` | Hono + Datastar on Cloudflare Workers |
-| `go-gin.md` | Go + Gin REST API patterns |
-| `nextjs.md` | Next.js + Tailwind patterns |
-| `fastapi.md` | Python + FastAPI patterns |
-
-During discovery, Kyotee reads these patterns and applies them during implementation.
-
-### Example Session
-
-```
-You: /kyotee
-
-Kyotee: What would you like to build?
-
-You: A REST API for managing bookmarks
-
-Kyotee: What tech stack?
-        [Web App / CLI / API / Library]
-
-You: API
-
-Kyotee: [Asks about framework, features...]
-
-You: Go with Gin, CRUD for bookmarks, tags, search
-
-Kyotee: Here's the spec:
-
-        Project: bookmark-api
-        Stack: Go + Gin
-        Features:
-          - CRUD endpoints for bookmarks
-          - Tag support
-          - Search functionality
-
-        Ready to implement? (yes/no/edit)
-
-You: yes
-
-Kyotee: [Creates files following Go+Gin patterns...]
-        Done! Run: go mod tidy && go run ./cmd/server
-```
-
-### Resume a Session
-
-Kyotee saves state in `.kyotee/` so you can pick up where you left off:
-
-```
-You: /kyotee
-
-Kyotee: Welcome back! Last session we were building your bookmark API.
-        The spec is approved and I've implemented the CRUD endpoints.
-
-        Remaining: tags and search
-
-        Should I continue?
-```
-
-## State Files
-
-Kyotee creates `.kyotee/` in your project:
-
-```
-.kyotee/
-├── spec.md           # Approved specification
-└── progress.json     # Execution state
-```
-
-## Adding Custom Patterns
-
-Create your own tech stack patterns:
+One-shot, no TUI (`--local` runs an in-process engine; otherwise `ask` is a
+thin client for a running `kyotee serve`, per the spec-09 skill adapter):
 
 ```bash
-# Create ~/.claude/skills/kyotee/references/my-stack.md
+./kyotee ask --local "who is the current UK prime minister?"   # slow mode, web_search, grounded answer
+./kyotee ask --wait --strategy council --budget 5 "monolith or microservices for a 4-person team?"
+./kyotee ask --wait --json --strategy council "..."            # stable JSON: answer, consensus, dissent, cost
 ```
 
-Include:
-- Project structure
-- Naming conventions
-- Code patterns
-- Configuration templates
-- Setup commands
+Headless engine + separate TUI:
 
-Example:
-```markdown
-# My Stack Patterns
-
-## Project Structure
-...
-
-## Naming Conventions
-...
-
-## Code Patterns
-...
+```bash
+./kyotee serve                              # HTTP/SSE on 127.0.0.1:8484
+./kyotee tui --url http://127.0.0.1:8484    # attach from another terminal
 ```
 
-## Tips
+## Why
 
-- **Be specific** during discovery - more detail = better implementation
-- **Review the spec** before approving - it's your source of truth
-- **Resume anytime** - just run `/kyotee` again
+- **Fast/slow thinking is structural.** LLMs answer present-state questions
+  from stale training data because nothing forces them to pause. Kyotee runs
+  a cheap gate before the solver: time-sensitive facts, multi-step math, or
+  low classifier confidence flip the task to slow mode, and a tool-need
+  pre-pass tells the solver *exactly* what it must look up (`web_search`
+  ships in v1). "Hope the model searches" becomes "the harness already
+  decided a search is required."
+- **Councils need vendor diversity.** Same-family models agree with each
+  other — false consensus. Council routes want ≥2 vendors (the engine warns
+  otherwise), debate across capped rounds, detect consensus by vote,
+  embedding similarity, or a judge model, and always end in a synthesis that
+  is honest about unresolved dissent.
+- **Budget is load-bearing.** Every route carries a USD ceiling. Expensive
+  strategies are preflighted and downgraded to solo when they can't fit;
+  warns fire at 50/80/95%; the executor halts at 100% and promotes the best
+  draft so far. Better a cheaper answer than a refusal.
+- **Everything is an event.** Classification, routing, thinking decisions,
+  every tool call, every council rebuttal and vote, every dollar — one event
+  bus, replayable from sequence 0, streamed over SSE. The TUI holds zero
+  orchestration logic.
 
-## License
+## TUI
 
-MIT
+Prompt, routing, and cost meter up top; a strategy-dependent center pane
+(streamed answer / divergent-vs-convergent columns / one pane per council
+member with live votes and a consensus indicator); thinking decisions and the
+raw event log below.
+
+Keys: `Enter` submit · `o` override & escalate (force strategy/thinking/budget
+for the next task) · `c` view/edit config with hot reload · `r` resume a
+persisted task · `q` quit.
+
+## Config
+
+`~/.kyotee/config.yaml` declares providers (Anthropic and any
+OpenAI-compatible endpoint — OpenAI, Gemini, local), model roles, strategy
+tuning, and the routing table:
+
+```yaml
+version: 1
+receptionist:
+  model: claude-haiku-4-5
+  routes:
+    - when: {complexity: trivial}
+      strategy: solo
+      thinking: fast
+      models: {primary: claude-haiku-4-5}
+      budget_usd: 0.05
+    - when: {domain: code, complexity: hard}
+      strategy: twobrain
+      thinking: slow
+      models: {primary: claude-opus-4-8, divergent: claude-sonnet-5, convergent: claude-sonnet-5}
+      budget_usd: 1.50
+    - when: {domain: reasoning, complexity: hard}
+      strategy: council
+      thinking: slow
+      models: {primary: claude-opus-4-8, council: [claude-opus-4-8, gpt-5, gemini-3-pro]}
+      budget_usd: 3.00
+    - strategy: solo        # default catch-all
+      thinking: auto
+      models: {primary: claude-sonnet-5}
+```
+
+Rules match top-to-bottom, first match wins; `tool_need: required` from the
+classifier forces slow mode regardless. `kyotee config validate <file>`
+pre-flights the full validation table. `PUT /v1/config` (or `c` in the TUI)
+hot-reloads; invalid config is rejected with a 400 and the old config stays
+live. Two-brain persona prompts are external files (`twobrain.prompts`), and
+the divergent/convergent temperature split (`div_temp`/`conv_temp`) is the
+mechanism that produces the behavioural split.
+
+## HTTP API
+
+| Method & path | Purpose |
+|---|---|
+| `POST /v1/tasks` | submit `{text, overrides?}` → `{task_id}`; invalid override → 400 |
+| `GET /v1/tasks` | list persisted tasks |
+| `GET /v1/tasks/{id}` | full persisted state (transcript, cost, checkpoints) |
+| `GET /v1/tasks/{id}/events` | SSE: replay from seq 0 (survives engine restarts), live tail, `event: done` terminator |
+| `POST /v1/tasks/{id}/resume` | re-run remaining stages from checkpoints |
+| `GET /v1/config` / `PUT /v1/config` | effective YAML / validated hot reload |
+| `POST /v1/config/reload` | re-read the config file from disk |
+| `GET /v1/providers` | registered models + capabilities + cost |
+| `GET /v1/healthz` | liveness |
+
+## Development
+
+```bash
+go test ./...        # everything runs on scripted fake providers — no keys
+go test -race ./...  # council openings/rebuttals are parallel
+```
+
+## Claude Code skill
+
+[`skill/SKILL.md`](skill/SKILL.md) lets a Claude Code session delegate a hard
+sub-decision to a running engine ("consult a panel, not become the panel"):
+`kyotee ask --strategy council --wait --json` returns the synthesised answer
+with consensus state and any dissent, ready to fold back into the session.
+
+Specs are in [`docs/specs/`](docs/specs/); architecture notes in
+[`CLAUDE.md`](CLAUDE.md).
