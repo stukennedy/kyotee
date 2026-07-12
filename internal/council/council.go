@@ -237,7 +237,7 @@ End your reply with a single JSON object on its own line (no fences):
 {"choice": "<short label for the answer/option you support>", "confidence": <0..1>, "agree_with_group": <bool>}`
 
 func (c *Stage) openingPrompt(st *pipeline.State, method string) string {
-	p := "Task:\n" + st.Original + "\n\nState your opening position: your answer and the key reasons for it."
+	p := "Task:\n" + st.PromptBody() + "\n\nState your opening position: your answer and the key reasons for it."
 	if method == "vote" {
 		p += voteInstruction
 	}
@@ -255,7 +255,7 @@ The other council members' latest positions (distilled):
 %s
 
 Rebut or revise. If another member's argument is stronger, adopt it and say so. State clearly whether you now agree with the group.`,
-		st.Original, round, distill(m.position, 1200), strings.Join(others, "\n\n---\n\n"))
+		st.PromptBody(), round, distill(m.position, 1200), strings.Join(others, "\n\n---\n\n"))
 	if method == "vote" {
 		p += voteInstruction
 	}

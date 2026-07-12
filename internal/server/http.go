@@ -15,7 +15,7 @@ import (
 
 // Handler builds the engine's HTTP mux (spec 02 §3):
 //
-//	POST /v1/tasks                {text, overrides?} → 201 {task_id}; invalid override → 400
+//	POST /v1/tasks                {text, thread_id?, overrides?} → 201 {task_id, thread_id}; invalid override → 400
 //	GET  /v1/tasks                → [TaskInfo]
 //	GET  /v1/tasks/{id}           → persisted State snapshot
 //	GET  /v1/tasks/{id}/events    → SSE: replay from Seq 0, live tail, ": ping", "event: done"
@@ -31,18 +31,19 @@ func (e *Engine) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Text      string                 `json:"text"`
+			ThreadID  string                 `json:"thread_id"`
 			Overrides receptionist.Overrides `json:"overrides"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 			return
 		}
-		taskID, err := e.Submit(body.Text, body.Overrides)
+		taskID, threadID, err := e.Submit(body.Text, body.Overrides, body.ThreadID)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]string{"task_id": taskID})
+		writeJSON(w, http.StatusCreated, map[string]string{"task_id": taskID, "thread_id": threadID})
 	})
 
 	mux.HandleFunc("GET /v1/tasks", func(w http.ResponseWriter, r *http.Request) {

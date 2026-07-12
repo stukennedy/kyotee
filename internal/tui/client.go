@@ -28,9 +28,12 @@ func NewClient(baseURL string) *Client {
 	return &Client{BaseURL: baseURL, HTTP: &http.Client{Timeout: 30 * time.Second}}
 }
 
-func (c *Client) SubmitCmd(text string, ov receptionist.Overrides) app.Cmd {
+// SubmitCmd POSTs a task. A non-empty threadID continues that conversation;
+// the response carries the (possibly newly minted) thread_id back so the TUI
+// can keep threading follow-ups.
+func (c *Client) SubmitCmd(text, threadID string, ov receptionist.Overrides) app.Cmd {
 	return func() app.Msg {
-		body, _ := json.Marshal(map[string]any{"text": text, "overrides": ov})
+		body, _ := json.Marshal(map[string]any{"text": text, "thread_id": threadID, "overrides": ov})
 		resp, err := c.HTTP.Post(c.BaseURL+"/v1/tasks", "application/json", bytes.NewReader(body))
 		if err != nil {
 			return TaskCreatedMsg{Err: err}
@@ -40,12 +43,13 @@ func (c *Client) SubmitCmd(text string, ov receptionist.Overrides) app.Cmd {
 			return TaskCreatedMsg{Err: apiError(resp)}
 		}
 		var out struct {
-			TaskID string `json:"task_id"`
+			TaskID   string `json:"task_id"`
+			ThreadID string `json:"thread_id"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 			return TaskCreatedMsg{Err: err}
 		}
-		return TaskCreatedMsg{TaskID: out.TaskID}
+		return TaskCreatedMsg{TaskID: out.TaskID, ThreadID: out.ThreadID}
 	}
 }
 
@@ -82,6 +86,40 @@ func (c *Client) StreamSub(ctx context.Context, taskID string) app.Sub {
 		}
 		send(SSEStatusMsg{Connected: false})
 		return nil
+	}
+}
+
+// HealthSub polls GET /v1/healthz and reports engine reachability as a stream
+// of HealthMsg. Unlike the per-task SSE stream it lives for the whole session,
+// so the header can distinguish "engine reachable" from "a task is streaming".
+func (c *Client) HealthSub(ctx context.Context) app.Sub {
+	return func(send func(app.Msg)) app.Msg {
+		check := func() {
+			cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			req, err := http.NewRequestWithContext(cctx, http.MethodGet, c.BaseURL+"/v1/healthz", nil)
+			if err != nil {
+				send(HealthMsg{Up: false})
+				return
+			}
+			resp, err := c.HTTP.Do(req)
+			up := err == nil && resp.StatusCode == http.StatusOK
+			if resp != nil {
+				resp.Body.Close()
+			}
+			send(HealthMsg{Up: up})
+		}
+		check() // report reachability immediately, don't wait a full interval
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				check()
+			}
+		}
 	}
 }
 

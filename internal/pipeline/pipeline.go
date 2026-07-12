@@ -5,6 +5,7 @@ package pipeline
 import (
 	"context"
 	"slices"
+	"strings"
 
 	"github.com/stukennedy/kyotee/internal/events"
 	"github.com/stukennedy/kyotee/internal/provider"
@@ -68,7 +69,10 @@ func (b *BudgetState) RemainingUSD() float64 {
 // persistence and must be JSON-serializable.
 type State struct {
 	TaskID      string            `json:"task_id"`
-	Original    string            `json:"original"` // the user's original request
+	ThreadID    string            `json:"thread_id,omitempty"` // conversation this task belongs to
+	ParentID    string            `json:"parent_id,omitempty"` // the prior task in the thread, if any
+	Original    string            `json:"original"`            // the user's request for THIS turn
+	History     []Exchange        `json:"history,omitempty"`   // prior turns in the thread (self-contained)
 	Class       Classification    `json:"class"`
 	Transcript  []Turn            `json:"transcript"` // accumulated reasoning/answers across stages
 	Draft       string            `json:"draft"`      // current best-answer candidate
@@ -76,6 +80,47 @@ type State struct {
 	Budget      BudgetState       `json:"budget"`
 	Checkpoints []string          `json:"checkpoints"` // stage IDs completed, for resume
 	Meta        map[string]string `json:"meta"`
+}
+
+// Exchange is one completed user↔assistant turn carried forward as
+// conversation context for follow-up tasks in the same thread.
+type Exchange struct {
+	User      string `json:"user"`
+	Assistant string `json:"assistant"`
+}
+
+// maxHistoryAnswerRunes bounds how much of each prior answer is replayed into
+// a follow-up prompt, so a long thread cannot blow the context window/budget.
+const maxHistoryAnswerRunes = 1500
+
+// PromptBody returns the request text a solving stage should answer. For a
+// first turn (no history) it is Original verbatim, so non-threaded tasks are
+// byte-for-byte identical to before. For a follow-up it prepends the prior
+// turns so every strategy sees the conversation without any per-stage change.
+func (s *State) PromptBody() string {
+	if len(s.History) == 0 {
+		return s.Original
+	}
+	var b strings.Builder
+	b.WriteString("This is a follow-up in an ongoing conversation. Earlier turns:\n\n")
+	for _, ex := range s.History {
+		b.WriteString("User: ")
+		b.WriteString(ex.User)
+		b.WriteString("\n\nAssistant: ")
+		b.WriteString(truncateRunes(ex.Assistant, maxHistoryAnswerRunes))
+		b.WriteString("\n\n")
+	}
+	b.WriteString("---\n\nCurrent request:\n")
+	b.WriteString(s.Original)
+	return b.String()
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 type Turn struct {

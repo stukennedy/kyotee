@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/stukennedy/tooey/component"
+	"github.com/stukennedy/tooey/markdown"
 	"github.com/stukennedy/tooey/node"
 )
 
@@ -56,13 +57,29 @@ func (m *Model) viewMain() node.Node {
 }
 
 func (m *Model) viewHeader() node.Node {
-	conn := node.TextStyled(" ● offline ", cDanger, 0, 0)
-	if m.Connected {
-		conn = node.TextStyled(" ● live ", cOK, 0, 0)
+	// The badge tracks engine reachability (health poll), NOT the per-task
+	// stream — so it stays "live" between tasks and only turns red when the
+	// engine is genuinely unreachable. A "⇅" marks an active task stream.
+	var conn node.Node
+	switch {
+	case m.EngineUp:
+		label := " ● live "
+		if m.Connected {
+			label = " ● live ⇅ "
+		}
+		conn = node.TextStyled(label, cOK, 0, 0)
+	case m.pollStarted:
+		conn = node.TextStyled(" ● offline ", cDanger, 0, 0)
+	default:
+		conn = node.TextStyled(" ● connecting ", cDim, 0, 0)
+	}
+	idLabel := " " + m.TaskID + " "
+	if n := len(m.Turns); n > 0 {
+		idLabel = fmt.Sprintf(" %s · turns:%d ", m.TaskID, n)
 	}
 	return node.Row(
 		node.TextStyled(" Kyotee Harness ", cAccent, 0, node.Bold),
-		node.TextStyled(" "+m.TaskID+" ", cDim, 0, 0),
+		node.TextStyled(idLabel, cDim, 0, 0),
 		node.Spacer(),
 		conn,
 		m.costMeter(),
@@ -125,16 +142,49 @@ func (m *Model) viewCenter() node.Node {
 }
 
 func (m *Model) viewSolo() node.Node {
-	title := " Answer "
-	body := m.Final
-	if body == "" {
-		body = "…working…"
-		title = " Working "
+	var rows []node.Node
+	for _, t := range m.Turns { // running conversation transcript
+		rows = append(rows, turnBlock(t.Prompt, t.Answer)...)
 	}
-	return node.Column(
-		node.TextStyled(title, cAccent, 0, node.Bold),
-		wrapText(body, 110),
-	).WithScrollToBottom()
+	switch {
+	case m.lastPrompt != "": // a turn is in flight
+		answer := node.TextStyled(" …working… ", cDim, 0, 0)
+		if m.Final != "" {
+			answer = renderMarkdown(m.Final, 110)
+		}
+		rows = append(rows,
+			node.TextStyled(" › "+truncate(m.lastPrompt, 100), cAccent, 0, node.Bold),
+			answer)
+	case len(m.Turns) == 0 && m.Final != "": // e.g. a resumed one-shot task
+		rows = append(rows,
+			node.TextStyled(" Answer ", cAccent, 0, node.Bold),
+			renderMarkdown(m.Final, 110))
+	case len(rows) == 0:
+		rows = append(rows,
+			node.TextStyled(" Working ", cAccent, 0, node.Bold),
+			node.TextStyled(" …working… ", cDim, 0, 0))
+	}
+	return node.Column(rows...).WithScrollToBottom()
+}
+
+// turnBlock renders one completed conversation exchange: the prompt, then the
+// markdown-styled answer.
+func turnBlock(prompt, answer string) []node.Node {
+	return []node.Node{
+		node.TextStyled(" › "+truncate(prompt, 100), cAccent, 0, node.Bold),
+		renderMarkdown(answer, 110),
+		node.Text(""),
+	}
+}
+
+// renderMarkdown styles a final answer with Tooey's markdown renderer
+// (headings, bold/italic, code fences, lists, quotes). Streaming/interim
+// snippets keep wrapText — they are rarely well-formed markdown.
+func renderMarkdown(s string, width int) node.Node {
+	if width < 20 {
+		width = 20
+	}
+	return node.Column(markdown.Render(s, width, 0)...)
 }
 
 func (m *Model) viewTwoBrain() node.Node {
@@ -164,7 +214,7 @@ func (m *Model) viewTwoBrain() node.Node {
 		}
 		return node.Column(cols,
 			node.TextStyled(" referee ", cOK, 0, node.Bold),
-			wrapText(text, 110),
+			renderMarkdown(text, 110),
 		)
 	}
 	return node.Column(cols)
@@ -194,7 +244,7 @@ func (m *Model) viewCouncil() node.Node {
 	if m.Synthesis != "" {
 		rows = append(rows,
 			node.TextStyled(" synthesis ", cOK, 0, node.Bold),
-			wrapText(m.Synthesis, 110))
+			renderMarkdown(m.Synthesis, 110))
 	}
 	return node.Column(rows...)
 }
@@ -228,9 +278,16 @@ func (m *Model) viewLog() node.Node {
 }
 
 func (m *Model) viewFooter() node.Node {
+	mode, modeColor, hint := " -- INSERT -- ", node.Color(cConv),
+		" type · Enter: submit · Esc: NORMAL mode "
+	if m.Mode == modeNormal {
+		mode, modeColor, hint = " -- NORMAL -- ", node.Color(cWarn),
+			" i/a: insert · Enter: submit · n: new convo · o: override · c: config · r: resume · q: quit "
+	}
 	return node.Row(
-		node.TextStyled(" Enter: submit · o: override&escalate · c: config · r: resume · q: quit (empty prompt) · Ctrl+C×2 ", cDim, 0, 0),
+		node.TextStyled(hint, cDim, 0, 0),
 		node.Spacer(),
+		node.TextStyled(mode, modeColor, 0, node.Bold),
 		node.TextStyled(" "+m.Status+" ", cWarn, 0, 0),
 	)
 }

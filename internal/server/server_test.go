@@ -133,11 +133,53 @@ func TestSubmitStreamAndDone(t *testing.T) {
 	}
 }
 
+// A follow-up in a thread must carry the prior turn's Q&A into the new task
+// so the solving stage answers with conversational context.
+func TestConversationThreadCarriesContext(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEngine(t, dir)
+
+	id1, thread, err := e.Submit("what is the capital of France?", receptionist.Overrides{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thread != id1 {
+		t.Fatalf("first task should mint a thread named after itself: thread=%q id=%q", thread, id1)
+	}
+	waitForFinal(t, e, id1)
+
+	id2, thread2, err := e.Submit("and its population?", receptionist.Overrides{}, thread)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thread2 != thread {
+		t.Fatalf("follow-up should stay in the same thread: %q != %q", thread2, thread)
+	}
+	waitForFinal(t, e, id2)
+
+	st2, err := e.Store.Load(id2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st2.ParentID != id1 {
+		t.Fatalf("turn 2 parent = %q, want %q", st2.ParentID, id1)
+	}
+	if len(st2.History) != 1 {
+		t.Fatalf("turn 2 should carry exactly 1 prior exchange, got %d", len(st2.History))
+	}
+	if st2.History[0].User != "what is the capital of France?" || st2.History[0].Assistant == "" {
+		t.Fatalf("turn 2 history did not capture turn 1 Q&A: %+v", st2.History[0])
+	}
+	if body := st2.PromptBody(); !strings.Contains(body, "capital of France") || !strings.Contains(body, "Current request:") {
+		t.Fatalf("turn 2 solving prompt missing conversation context:\n%s", body)
+	}
+}
+
 // Replay must survive an engine restart via the persisted event log.
 func TestReplayAcrossEngineRestart(t *testing.T) {
 	dir := t.TempDir()
 	e1 := newTestEngine(t, dir)
-	taskID, err := e1.Submit("persist me", receptionist.Overrides{})
+	taskID, _, err := e1.Submit("persist me", receptionist.Overrides{}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

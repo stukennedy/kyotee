@@ -26,8 +26,9 @@ type (
 	SSEStatusMsg struct{ Connected bool }
 	// TaskCreatedMsg is the POST /v1/tasks result.
 	TaskCreatedMsg struct {
-		TaskID string
-		Err    error
+		TaskID   string
+		ThreadID string
+		Err      error
 	}
 	// ConfigFetchedMsg is the GET /v1/config result.
 	ConfigFetchedMsg struct {
@@ -46,6 +47,17 @@ type (
 		TaskID string
 		Err    error
 	}
+	// HealthMsg reports engine reachability from the background poll.
+	HealthMsg struct{ Up bool }
+)
+
+// inputMode drives the vim-style modal input: NORMAL treats letters as
+// commands, INSERT sends every key into the prompt.
+type inputMode int
+
+const (
+	modeInsert inputMode = iota // default: typing a prompt is the primary action
+	modeNormal
 )
 
 type TaskSummary struct {
@@ -68,6 +80,13 @@ type BrainTurn struct {
 	Role  string
 	Round int
 	Text  string
+}
+
+// ConvTurn is one completed user↔assistant exchange in the current
+// conversation, shown as a running transcript above the live answer.
+type ConvTurn struct {
+	Prompt string
+	Answer string
 }
 
 // overlay identifies which modal is active.
@@ -107,8 +126,18 @@ type Model struct {
 	Log       []string
 	seen      map[int64]bool // Seq de-dup across reconnects
 
-	Connected bool
+	Connected bool // a per-task SSE stream is currently open
+	EngineUp  bool // engine reachable, per the /v1/healthz poll
 	Status    string
+
+	Mode        inputMode
+	pollStarted bool // guards one-time bootstrap of the health poll
+
+	// Conversation threading: consecutive prompts continue the same thread
+	// until the user starts a new one (NORMAL 'n').
+	ThreadID   string
+	Turns      []ConvTurn // completed exchanges in this conversation
+	lastPrompt string     // prompt in flight, paired with its answer on task.final
 
 	// Overlays.
 	Active      overlay
@@ -142,7 +171,8 @@ func NewModel(client *Client) *Model {
 		Input:   component.NewTextInput("describe a task and press Enter…"),
 		Council: map[string]*MemberView{},
 		seen:    map[int64]bool{},
-		Status:  "ready",
+		Status:  "connecting…",
+		Mode:    modeInsert,
 	}
 	m.Input.Focused = true
 	return m
@@ -164,7 +194,20 @@ func (m *Model) reset(taskID string) {
 	m.seen = map[int64]bool{}
 }
 
+// Update wraps update with a one-time bootstrap of the engine health poll.
+// The app framework has no init hook, so the poll is started on the first
+// message the model ever processes (any key, resize, or command result); it
+// then self-loops for the rest of the session.
 func Update(m *Model, msg app.Msg) app.UpdateResult[*Model] {
+	res := update(m, msg)
+	if !m.pollStarted {
+		m.pollStarted = true
+		res.Subs = append(res.Subs, m.Client.HealthSub(context.Background()))
+	}
+	return res
+}
+
+func update(m *Model, msg app.Msg) app.UpdateResult[*Model] {
 	switch msg := msg.(type) {
 	case app.KeyMsg:
 		return m.handleKey(msg.Key)
@@ -189,6 +232,9 @@ func Update(m *Model, msg app.Msg) app.UpdateResult[*Model] {
 	case SSEStatusMsg:
 		m.Connected = msg.Connected
 		return app.NoCmd(m)
+	case HealthMsg:
+		m.EngineUp = msg.Up
+		return app.NoCmd(m)
 
 	case TaskCreatedMsg:
 		if msg.Err != nil {
@@ -196,6 +242,7 @@ func Update(m *Model, msg app.Msg) app.UpdateResult[*Model] {
 			return app.NoCmd(m)
 		}
 		m.reset(msg.TaskID)
+		m.ThreadID = msg.ThreadID // continue this thread on the next prompt
 		m.Status = "task " + msg.TaskID
 		return app.WithSub(m, m.startStream(msg.TaskID))
 
@@ -258,37 +305,77 @@ func (m *Model) handleKey(k input.Key) app.UpdateResult[*Model] {
 		return m.handleOverrideKey(k)
 	}
 
+	if m.Mode == modeNormal {
+		return m.handleNormalKey(k)
+	}
+	return m.handleInsertKey(k)
+}
+
+// handleInsertKey: every key edits the prompt. Enter submits; Escape drops to
+// NORMAL so the command letters become available.
+func (m *Model) handleInsertKey(k input.Key) app.UpdateResult[*Model] {
 	switch k.Type {
+	case input.Escape:
+		m.Mode = modeNormal
+		return app.NoCmd(m)
 	case input.Enter:
-		text := strings.TrimSpace(m.Input.Value)
-		if text == "" {
-			return app.NoCmd(m)
-		}
-		ov := m.Override
-		m.Input = component.NewTextInput(m.Input.Placeholder)
-		m.Input.Focused = true
-		m.Status = "submitting…"
-		return app.WithCmd(m, m.Client.SubmitCmd(text, ov))
-	case input.RuneKey:
-		// Command keys only fire on an empty prompt so typing stays natural.
-		if m.Input.Value == "" {
-			switch k.Rune {
-			case 'q':
-				return app.Quit(m)
-			case 'c':
-				m.Status = "fetching config…"
-				return app.WithCmd(m, m.Client.FetchConfigCmd())
-			case 'r':
-				m.Status = "listing tasks…"
-				return app.WithCmd(m, m.Client.ListTasksCmd())
-			case 'o':
-				m.Active = overlayOverride
-				return app.NoCmd(m)
-			}
-		}
+		return m.submit()
 	}
 	m.Input = m.Input.Update(k)
 	return app.NoCmd(m)
+}
+
+// handleNormalKey: letters are commands (never typed into the prompt), so a
+// prompt starting with c/o/q/r no longer triggers a modal. i/a enter INSERT.
+func (m *Model) handleNormalKey(k input.Key) app.UpdateResult[*Model] {
+	switch k.Type {
+	case input.Enter:
+		return m.submit()
+	case input.RuneKey:
+		switch k.Rune {
+		case 'i', 'a':
+			m.Mode = modeInsert
+		case 'n':
+			m.newConversation()
+		case 'q':
+			return app.Quit(m)
+		case 'c':
+			m.Status = "fetching config…"
+			return app.WithCmd(m, m.Client.FetchConfigCmd())
+		case 'r':
+			m.Status = "listing tasks…"
+			return app.WithCmd(m, m.Client.ListTasksCmd())
+		case 'o':
+			m.Active = overlayOverride
+		}
+	}
+	return app.NoCmd(m)
+}
+
+// submit sends the current prompt as a task in the active thread and clears
+// the input. The engine assigns/echoes the thread_id, so consecutive prompts
+// form one continuous conversation until the user starts a new one.
+func (m *Model) submit() app.UpdateResult[*Model] {
+	text := strings.TrimSpace(m.Input.Value)
+	if text == "" {
+		return app.NoCmd(m)
+	}
+	ov := m.Override
+	m.lastPrompt = text
+	m.Input = component.NewTextInput(m.Input.Placeholder)
+	m.Input.Focused = true
+	m.Mode = modeInsert
+	m.Status = "submitting…"
+	return app.WithCmd(m, m.Client.SubmitCmd(text, m.ThreadID, ov))
+}
+
+// newConversation abandons the current thread so the next prompt starts fresh.
+func (m *Model) newConversation() {
+	m.reset("")
+	m.ThreadID = ""
+	m.Turns = nil
+	m.lastPrompt = ""
+	m.Status = "new conversation"
 }
 
 func (m *Model) handleConfigKey(k input.Key) app.UpdateResult[*Model] {
@@ -465,6 +552,10 @@ func (m *Model) applyEvent(ev events.Event) {
 		m.Stage = "done"
 		if m.Strategy == "council" {
 			m.Synthesis = m.Final
+		}
+		if m.Final != "" && m.lastPrompt != "" {
+			m.Turns = append(m.Turns, ConvTurn{Prompt: m.lastPrompt, Answer: m.Final})
+			m.lastPrompt = ""
 		}
 	case events.KindError:
 		if msg, ok := p["message"].(string); ok {

@@ -95,7 +95,7 @@ func rootCmd() *cobra.Command {
 
 	// ask is the Skill shim (spec 09): a stateless HTTP client for a running
 	// engine. --local runs an in-process engine instead (no daemon needed).
-	var strategy, thinkingMode, consensusMethod, urlFlag string
+	var strategy, thinkingMode, consensusMethod, urlFlag, threadID string
 	var maxCost float64
 	var councilRounds int
 	var doWait, jsonOut, local bool
@@ -124,11 +124,12 @@ func rootCmd() *cobra.Command {
 				srv := &http.Server{Handler: eng.Handler()}
 				go srv.Serve(ln)
 				defer srv.Close()
-				return runRemoteAsk("http://"+ln.Addr().String(), prompt, ov, true, jsonOut, os.Stdout, os.Stderr)
+				return runRemoteAsk("http://"+ln.Addr().String(), prompt, threadID, ov, true, jsonOut, os.Stdout, os.Stderr)
 			}
-			return runRemoteAsk(engineURL(urlFlag), prompt, ov, doWait, jsonOut, os.Stdout, os.Stderr)
+			return runRemoteAsk(engineURL(urlFlag), prompt, threadID, ov, doWait, jsonOut, os.Stdout, os.Stderr)
 		},
 	}
+	ask.Flags().StringVar(&threadID, "thread", "", "continue a conversation: the thread_id printed by a prior ask")
 	ask.Flags().StringVar(&strategy, "strategy", "", "force strategy: solo|twobrain|council")
 	ask.Flags().StringVar(&thinkingMode, "thinking", "", "force thinking mode: fast|slow|auto")
 	ask.Flags().Float64Var(&maxCost, "budget", 0, "per-task budget ceiling in USD")

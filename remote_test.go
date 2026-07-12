@@ -48,7 +48,7 @@ func TestRemoteAskWait(t *testing.T) {
 	_, srv := mockEngineServer(t)
 	var stdout, stderr bytes.Buffer
 
-	err := runRemoteAsk(srv.URL, "hello", receptionist.Overrides{}, true, false, &stdout, &stderr)
+	err := runRemoteAsk(srv.URL, "hello", "", receptionist.Overrides{}, true, false, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestRemoteAskNoWaitPrintsTaskID(t *testing.T) {
 	eng, srv := mockEngineServer(t)
 	var stdout, stderr bytes.Buffer
 
-	if err := runRemoteAsk(srv.URL, "fire and forget", receptionist.Overrides{}, false, false, &stdout, &stderr); err != nil {
+	if err := runRemoteAsk(srv.URL, "fire and forget", "", receptionist.Overrides{}, false, false, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	taskID := strings.TrimSpace(stdout.String())
@@ -95,7 +95,7 @@ func TestRemoteAskJSONCouncil(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	ov := receptionist.Overrides{Strategy: "council", CouncilRounds: 2, BudgetUSD: 50}
-	if err := runRemoteAsk(srv.URL, "pick a database", ov, true, true, &stdout, &stderr); err != nil {
+	if err := runRemoteAsk(srv.URL, "pick a database", "", ov, true, true, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	var res askResult
@@ -130,7 +130,7 @@ func TestRemoteAskJSONCouncil(t *testing.T) {
 func TestRemoteAskEngineErrorNonZero(t *testing.T) {
 	_, srv := mockEngineServer(t)
 	var stdout, stderr bytes.Buffer
-	err := runRemoteAsk(srv.URL, "x", receptionist.Overrides{Strategy: "galactic"}, true, false, &stdout, &stderr)
+	err := runRemoteAsk(srv.URL, "x", "", receptionist.Overrides{Strategy: "galactic"}, true, false, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("engine 400 must surface as an error")
 	}
@@ -140,7 +140,7 @@ func TestRemoteAskEngineErrorNonZero(t *testing.T) {
 func TestRemoteAskNoEngineFailsFast(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	err := runRemoteAsk("http://127.0.0.1:1", "x", receptionist.Overrides{}, true, false, &stdout, &stderr)
+	err := runRemoteAsk("http://127.0.0.1:1", "x", "", receptionist.Overrides{}, true, false, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected connection failure")
 	}

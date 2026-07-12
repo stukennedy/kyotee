@@ -41,7 +41,7 @@ func (s *Synthesis) Run(ctx context.Context, st *pipeline.State, emit events.Emi
 	}
 
 	system := "You are the synthesiser of a multi-model council debate. Produce the single best final answer to the user's task, grounded in the debate. Answer the user directly — do not narrate the debate."
-	prompt := "Task:\n" + st.Original + "\n\nFull debate transcript:\n\n" + debate.String()
+	prompt := "Task:\n" + st.PromptBody() + "\n\nFull debate transcript:\n\n" + debate.String()
 
 	switch st.Meta[MetaOutcome] {
 	case "synthesis_notes_dissent":

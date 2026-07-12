@@ -32,7 +32,7 @@ func (s *Solo) Run(ctx context.Context, st *pipeline.State, emit events.Emitter)
 	flagged := FlaggedTools(st)
 	req := provider.Request{
 		System:          soloSystem + ToolInstruction(flagged),
-		Messages:        []provider.Message{provider.UserText(st.Original)},
+		Messages:        []provider.Message{provider.UserText(st.PromptBody())},
 		ReasoningEffort: SolverEffort(st),
 		MaxTokens:       s.MaxTokens,
 		Temperature:     s.Temperature,

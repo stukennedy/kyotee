@@ -106,29 +106,71 @@ func (e *Engine) receptionist() *receptionist.Receptionist {
 }
 
 // Submit validates the override, creates a task, kicks off its pipeline in
-// the background, and returns the task ID. An invalid override rejects the
-// task before it starts (spec 07 §4).
-func (e *Engine) Submit(text string, ov receptionist.Overrides) (string, error) {
+// the background, and returns the task ID plus the (possibly newly minted)
+// thread ID. An invalid override rejects the task before it starts (spec 07
+// §4). A non-empty threadID continues an existing conversation: the prior
+// turns are carried forward as context (see State.PromptBody).
+func (e *Engine) Submit(text string, ov receptionist.Overrides, threadID string) (taskID, thread string, err error) {
 	if text == "" {
-		return "", fmt.Errorf("empty task text")
+		return "", "", fmt.Errorf("empty task text")
 	}
 	if err := ov.Validate(e.Holder.Get()); err != nil {
-		return "", err
+		return "", "", err
 	}
-	taskID := newTaskID()
+	taskID = newTaskID()
 	st := pipeline.NewState(taskID, text)
+
+	if threadID == "" {
+		// New conversation: the first task's ID names the thread.
+		st.ThreadID = taskID
+	} else {
+		st.ThreadID = threadID
+		if tip := e.threadTip(threadID); tip != nil {
+			st.ParentID = tip.TaskID
+			st.History = append([]pipeline.Exchange{}, tip.History...)
+			if tip.Final != "" {
+				st.History = append(st.History, pipeline.Exchange{User: tip.Original, Assistant: tip.Final})
+			}
+		}
+	}
+
 	// Persist the submit-time overrides so resume re-applies them — an
 	// override-escalated council task must not re-route as solo on resume.
 	if ovJSON, err := json.Marshal(ov); err == nil {
 		st.Meta["overrides"] = string(ovJSON)
 	}
+	// Save immediately so the task (and its ThreadID) is discoverable as a
+	// thread tip before its first stage checkpoints — rapid follow-ups thread
+	// correctly, and the task list shows it right away.
+	_ = e.Store.Save(st)
 
 	e.mu.Lock()
 	e.running[taskID] = true
 	e.mu.Unlock()
 
 	go e.run(st, ov)
-	return taskID, nil
+	return taskID, st.ThreadID, nil
+}
+
+// threadTip returns the most recent task in a thread (latest wins by ID, whose
+// timestamp prefix sorts lexicographically), or nil if the thread is unknown.
+// O(number of persisted tasks); fine for a single-user local store.
+func (e *Engine) threadTip(threadID string) *pipeline.State {
+	ids, err := e.Store.List()
+	if err != nil {
+		return nil
+	}
+	var tip *pipeline.State
+	for _, id := range ids {
+		st, err := e.Store.Load(id)
+		if err != nil || st.ThreadID != threadID {
+			continue
+		}
+		if tip == nil || st.TaskID > tip.TaskID {
+			tip = st
+		}
+	}
+	return tip
 }
 
 // Resume reloads a persisted task and re-runs its remaining stages.
@@ -200,6 +242,7 @@ func (e *Engine) run(st *pipeline.State, ov receptionist.Overrides) {
 // TaskInfo is the list-endpoint summary row.
 type TaskInfo struct {
 	TaskID   string  `json:"task_id"`
+	ThreadID string  `json:"thread_id"`
 	Original string  `json:"original"`
 	Final    string  `json:"final"`
 	Running  bool    `json:"running"`
@@ -225,7 +268,7 @@ func (e *Engine) Tasks() ([]TaskInfo, error) {
 			continue
 		}
 		out = append(out, TaskInfo{
-			TaskID: id, Original: st.Original, Final: st.Final,
+			TaskID: id, ThreadID: st.ThreadID, Original: st.Original, Final: st.Final,
 			Running: runningSnapshot[id], SpentUSD: st.Budget.SpentUSD,
 		})
 	}

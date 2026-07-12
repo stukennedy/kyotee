@@ -76,24 +76,26 @@ func apiErrFrom(resp *http.Response) error {
 	return fmt.Errorf("engine: HTTP %d", resp.StatusCode)
 }
 
-// submit POSTs a task and returns its ID.
-func (c *remoteClient) submit(text string, ov receptionist.Overrides) (string, error) {
-	payload, _ := json.Marshal(map[string]any{"text": text, "overrides": ov})
+// submit POSTs a task and returns its ID plus the thread it belongs to. A
+// non-empty threadID continues an existing conversation.
+func (c *remoteClient) submit(text, threadID string, ov receptionist.Overrides) (taskID, thread string, err error) {
+	payload, _ := json.Marshal(map[string]any{"text": text, "thread_id": threadID, "overrides": ov})
 	resp, err := c.http.Post(c.baseURL+"/v1/tasks", "application/json", bytes.NewReader(payload))
 	if err != nil {
-		return "", errNoEngine(c.baseURL, err)
+		return "", "", errNoEngine(c.baseURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		return "", apiErrFrom(resp)
+		return "", "", apiErrFrom(resp)
 	}
 	var out struct {
-		TaskID string `json:"task_id"`
+		TaskID   string `json:"task_id"`
+		ThreadID string `json:"thread_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return out.TaskID, nil
+	return out.TaskID, out.ThreadID, nil
 }
 
 func (c *remoteClient) resume(taskID string) error {
@@ -111,6 +113,7 @@ func (c *remoteClient) resume(taskID string) error {
 // askResult is the stable --json contract (spec 09 §4).
 type askResult struct {
 	TaskID       string        `json:"task_id"`
+	ThreadID     string        `json:"thread_id"`
 	Answer       string        `json:"answer"`
 	Strategy     string        `json:"strategy"`
 	Consensus    *askConsensus `json:"consensus,omitempty"`
@@ -227,6 +230,7 @@ func (c *remoteClient) wait(taskID string, progress io.Writer) (*askResult, erro
 		if res.Strategy == "" {
 			res.Strategy = st.Meta["strategy"]
 		}
+		res.ThreadID = st.ThreadID
 	}
 	return res, nil
 }
@@ -272,14 +276,15 @@ func num(v any) float64 {
 
 // runRemoteAsk implements `kyotee ask` against a running engine: submit,
 // optionally wait, print the answer (or the stable JSON contract) to stdout.
-func runRemoteAsk(baseURL, prompt string, ov receptionist.Overrides, doWait, jsonOut bool, stdout, stderr io.Writer) error {
+func runRemoteAsk(baseURL, prompt, threadID string, ov receptionist.Overrides, doWait, jsonOut bool, stdout, stderr io.Writer) error {
 	client := newRemoteClient(baseURL)
-	taskID, err := client.submit(prompt, ov)
+	taskID, thread, err := client.submit(prompt, threadID, ov)
 	if err != nil {
 		return err
 	}
 	if !doWait {
 		fmt.Fprintln(stdout, taskID)
+		fmt.Fprintf(stderr, "— thread %s (continue with: kyotee ask --thread %s \"…\")\n", thread, thread)
 		return nil
 	}
 	return waitAndPrint(client, taskID, jsonOut, stdout, stderr)
@@ -316,6 +321,9 @@ func waitAndPrint(client *remoteClient, taskID string, jsonOut bool, stdout, std
 		}
 	}
 	fmt.Fprintf(stderr, "— total cost $%.4f (%d tokens)\n", res.TotalCostUSD, res.TotalTokens)
+	if res.ThreadID != "" {
+		fmt.Fprintf(stderr, "— thread %s (continue with: kyotee ask --thread %s \"…\")\n", res.ThreadID, res.ThreadID)
+	}
 	return nil
 }
 

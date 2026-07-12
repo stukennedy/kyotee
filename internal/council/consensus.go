@@ -174,7 +174,7 @@ func (c *Stage) resolveDeadlock(ctx context.Context, st *pipeline.State, members
 		if c.Referee != nil {
 			resp, err := c.Referee.Generate(ctx, provider.Request{
 				System:    "You are the referee. The council deadlocked. Pick the strongest standing position and state the final answer, briefly justifying the pick.",
-				Messages:  []provider.Message{provider.UserText("Task:\n" + st.Original + "\n\nStanding positions:\n\n" + c.positionDigest(members))},
+				Messages:  []provider.Message{provider.UserText("Task:\n" + st.PromptBody() + "\n\nStanding positions:\n\n" + c.positionDigest(members))},
 				MaxTokens: c.MaxTokens,
 				Metadata:  map[string]string{"task_id": st.TaskID, "stage": c.ID(), "role": "referee"},
 			})

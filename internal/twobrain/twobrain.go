@@ -126,10 +126,10 @@ func (t *Stage) Run(ctx context.Context, st *pipeline.State, emit events.Emitter
 		if st.Budget.Exhausted() {
 			break
 		}
-		divPrompt := fmt.Sprintf("Task:\n%s\n\nRound %d of %d. Propose distinct approaches.", st.Original, r, rounds)
+		divPrompt := fmt.Sprintf("Task:\n%s\n\nRound %d of %d. Propose distinct approaches.", st.PromptBody(), r, rounds)
 		if lastConv != "" {
 			divPrompt = fmt.Sprintf("Task:\n%s\n\nRound %d of %d. The convergent brain's latest critique:\n%s\n\nRefine the surviving options and address the critique.",
-				st.Original, r, rounds, distill(lastConv))
+				st.PromptBody(), r, rounds, distill(lastConv))
 		}
 		div, err := t.turn(ctx, st, emit, t.Divergent, "divergent", prompts.Divergent, divPrompt, divTemp, r)
 		if err != nil {
@@ -141,7 +141,7 @@ func (t *Stage) Run(ctx context.Context, st *pipeline.State, emit events.Emitter
 			break
 		}
 		convPrompt := fmt.Sprintf("Task:\n%s\n\nRound %d of %d. The divergent brain proposes:\n%s\n\nCritique each option, rank them, and %s.",
-			st.Original, r, rounds, distill(lastDiv),
+			st.PromptBody(), r, rounds, distill(lastDiv),
 			map[bool]string{true: "converge on the strongest with your recommendation and rationale", false: "flag which need refinement"}[r == rounds])
 		conv, err := t.turn(ctx, st, emit, t.Convergent, "convergent", prompts.Convergent, convPrompt, convTemp, r)
 		if err != nil {
@@ -152,7 +152,7 @@ func (t *Stage) Run(ctx context.Context, st *pipeline.State, emit events.Emitter
 
 	// Referee reads the full transcript of the exchange.
 	var full strings.Builder
-	fmt.Fprintf(&full, "Task:\n%s\n\nFull two-brain exchange:\n", st.Original)
+	fmt.Fprintf(&full, "Task:\n%s\n\nFull two-brain exchange:\n", st.PromptBody())
 	round := 0
 	for _, turn := range st.Transcript {
 		if turn.Stage != t.ID() {
